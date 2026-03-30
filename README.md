@@ -73,6 +73,9 @@ python3 natural_attack.py \
   --dataset /path/to/benchmark_v2_dataset.json
 ```
 
+Or export `CEA_MI_DATASET=/path/to/benchmark_v2_dataset.json` before using
+`run_all_attacks_v3.sh`.
+
 ## Current limitation
 
 `nanobot` is still an external dependency. If its Python package is not importable,

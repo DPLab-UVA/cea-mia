@@ -25,9 +25,24 @@ from config import (
 if str(DEFAULT_NANOBOT_PROJECT) not in sys.path:
     sys.path.insert(0, str(DEFAULT_NANOBOT_PROJECT))
 
-from nanobot.memory.store import MemoryStore
-from nanobot.memory.recall import Recall, RecallResult, _tokenize, _relevance
-from nanobot.memory.models import SemanticMemory, EpisodicMemory
+NANOBOT_IMPORT_ERROR: Optional[Exception] = None
+try:
+    from nanobot.memory.store import MemoryStore
+    from nanobot.memory.recall import Recall, RecallResult, _tokenize, _relevance
+    from nanobot.memory.models import SemanticMemory, EpisodicMemory
+except ModuleNotFoundError as exc:
+    NANOBOT_IMPORT_ERROR = exc
+    MemoryStore = Recall = RecallResult = SemanticMemory = EpisodicMemory = Any
+    _tokenize = _relevance = None
+
+
+def _require_nanobot() -> None:
+    if NANOBOT_IMPORT_ERROR is None:
+        return
+    raise RuntimeError(
+        "nanobot is not importable. Set CEA_MI_NANOBOT_PROJECT to a checkout that "
+        "contains the nanobot package, or install nanobot into the active Python environment."
+    ) from NANOBOT_IMPORT_ERROR
 
 
 class AgentInterface:
@@ -55,6 +70,7 @@ class AgentInterface:
 
     @property
     def store(self) -> MemoryStore:
+        _require_nanobot()
         if self._store is None:
             self._store = MemoryStore(self.db_path)
             self._recall = Recall(self._store)
@@ -70,6 +86,7 @@ class AgentInterface:
 
     def inject_semantic_memory(self, content: str, tags: list[str] = None) -> str:
         """Inject a fact directly into semantic memory. Returns memory ID."""
+        _require_nanobot()
         mem = SemanticMemory(
             content=content,
             tags=tags or [],
@@ -114,6 +131,7 @@ class AgentInterface:
 
     def get_recall_scores(self, query: str) -> list[dict]:
         """White-box: get detailed recall scoring for a query."""
+        _require_nanobot()
         query_tokens = _tokenize(query)
         results = []
         for s in self.store.get_all_semantic():

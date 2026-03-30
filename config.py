@@ -23,7 +23,11 @@ DEFAULT_NANOBOT_DB_PATH = _env_path(
     Path.home() / ".nanobot" / "memory" / "pmc.db",
 )
 DEFAULT_NANOBOT_PROJECT = _env_path("CEA_MI_NANOBOT_PROJECT", REPO_ROOT)
-DEFAULT_DATASET_PATH = _env_path("CEA_MI_DATASET", REPO_ROOT / "benchmark_v2_dataset.json")
+DEFAULT_DATASET_PATH = (
+    Path(os.environ["CEA_MI_DATASET"]).expanduser()
+    if os.environ.get("CEA_MI_DATASET")
+    else None
+)
 DEFAULT_OUTPUT_DIR = _env_path("CEA_MI_OUTPUT_DIR", REPO_ROOT / "results")
 DEFAULT_DATA_DIR = _env_path("CEA_MI_DATA_DIR", REPO_ROOT / "data")
 
