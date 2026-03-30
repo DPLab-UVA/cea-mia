@@ -6,6 +6,7 @@ from typing import Optional
 
 import httpx
 
+from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
 from models import Fact, DecoyPair
 
 
@@ -20,9 +21,9 @@ class DecoyBuilder:
 
     def __init__(
         self,
-        api_base: str = "http://cheetah04:8000/v1",
-        api_key: str = "token-vllm",
-        model: str = "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+        api_base: str = DEFAULT_API_BASE,
+        api_key: str = DEFAULT_API_KEY,
+        model: str = DEFAULT_MODEL,
     ):
         self.api_base = api_base
         self.api_key = api_key

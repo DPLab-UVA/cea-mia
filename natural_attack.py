@@ -11,10 +11,7 @@ import time
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, "/bigtemp/trv3px/cea_mi")
-sys.path.insert(0, "/bigtemp/trv3px")
-
-from config import Config
+from config import Config, DEFAULT_DATASET_PATH
 from models import (Fact, DecoyPair, Probe, ProbeResult, ProbeType,
                     RoundEvidence, MembershipPrediction, AccessLevel)
 from agent_interface import AgentInterface
@@ -347,7 +344,7 @@ async def amain():
     parser.add_argument("--access", choices=["blackbox", "graybox", "whitebox"], default="blackbox")
     parser.add_argument("--num-facts", type=int, default=30, help="facts per class")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dataset", default="/bigtemp/trv3px/benchmark_v2_dataset.json")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_PATH))
     parser.add_argument("--db", default=None, help="PMC db path (default: from config)")
     parser.add_argument("--threshold", type=float, default=0.20,
                         help="token overlap threshold for member classification")
