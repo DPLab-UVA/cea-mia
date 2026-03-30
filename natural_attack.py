@@ -22,6 +22,7 @@ from probe_generator import ProbeGenerator
 from feature_extractor import FeatureExtractor
 from evidence_accumulator import EvidenceAccumulator, DistributionParams
 from evaluation import Evaluator
+from probe_batches import group_probe_pairs_by_round
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("natural_attack")
@@ -286,12 +287,17 @@ class NaturalAttack:
 
         evidence_trail = []
         # Run ALL probe rounds — no early stopping
-        for round_idx, (probe_f, probe_d) in enumerate(probe_pairs):
-            result_f = await self._execute_probe(probe_f, access_level)
-            result_d = await self._execute_probe(probe_d, access_level)
+        for round_idx, probe_batch in enumerate(group_probe_pairs_by_round(probe_pairs)):
+            batch_fact_results = []
+            batch_decoy_results = []
+            for probe_f, probe_d in probe_batch:
+                batch_fact_results.append(await self._execute_probe(probe_f, access_level))
+                batch_decoy_results.append(await self._execute_probe(probe_d, access_level))
+
+            probe_f, _ = probe_batch[0]
 
             features = self.feat_ext.extract_round_features(
-                pair.fact, [result_f], [result_d], probe_f.probe_type)
+                pair.fact, batch_fact_results, batch_decoy_results, probe_f.probe_type)
             score = self.feat_ext.compute_round_score(features)
 
             log.info("    round %d (%s): delta=%.4f  sim_f=%.3f sim_d=%.3f",
@@ -305,7 +311,7 @@ class NaturalAttack:
                 score_fact=features.get("fact_similarity_mean", 0),
                 score_decoy=features.get("decoy_similarity_mean", 0),
                 delta_score=score, features=features,
-                fact_results=[result_f], decoy_results=[result_d])
+                fact_results=batch_fact_results, decoy_results=batch_decoy_results)
             evidence_trail.append(evidence)
 
         pred = self.accumulator.accumulate(evidence_trail)
