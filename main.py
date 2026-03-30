@@ -87,7 +87,7 @@ class CEAMIExperiment:
         max_rounds = {"whitebox": self.cfg.max_rounds_whitebox,
                       "graybox": self.cfg.max_rounds_graybox,
                       "blackbox": self.cfg.max_rounds_blackbox}.get(access_level, 40)
-        grouped_probe_pairs = group_probe_pairs_by_round(probe_pairs[:max_rounds])
+        grouped_probe_pairs = group_probe_pairs_by_round(probe_pairs, max_rounds=max_rounds)
         for round_idx, probe_batch in enumerate(grouped_probe_pairs):
             batch_fact_results = []
             batch_decoy_results = []

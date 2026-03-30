@@ -4,7 +4,7 @@ from __future__ import annotations
 from models import ProbeType
 
 
-def group_probe_pairs_by_round(probe_pairs):
+def group_probe_pairs_by_round(probe_pairs, max_rounds=None):
     """Keep singleton rounds except for contiguous paraphrase variants."""
     grouped = []
     current_batch = []
@@ -23,4 +23,6 @@ def group_probe_pairs_by_round(probe_pairs):
     if current_batch:
         grouped.append(current_batch)
 
+    if max_rounds is not None:
+        return grouped[:max_rounds]
     return grouped

@@ -34,6 +34,21 @@ class GroupProbePairsByRoundTest(unittest.TestCase):
             ],
         )
 
+    def test_applies_round_limit_after_grouping(self):
+        probe_pairs = [
+            pair(ProbeType.DIRECT_RECALL, 0),
+            pair(ProbeType.PARAPHRASE, 1),
+            pair(ProbeType.PARAPHRASE, 1),
+            pair(ProbeType.PARAPHRASE, 1),
+            pair(ProbeType.INDIRECT_REASONING, 2),
+            pair(ProbeType.CONTRADICTION, 3),
+        ]
+
+        grouped = group_probe_pairs_by_round(probe_pairs, max_rounds=2)
+
+        self.assertEqual([len(batch) for batch in grouped], [1, 3])
+        self.assertEqual(len(grouped), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
