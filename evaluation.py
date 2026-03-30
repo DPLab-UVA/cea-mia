@@ -34,9 +34,20 @@ class Evaluator:
         # Scale factor: 5.0 maps score range ~[-1,1] to sigmoid range ~[0.007, 0.993]
         return 1.0 / (1.0 + np.exp(-5.0 * scores))
 
+    @staticmethod
+    def _prediction_prob(prediction: MembershipPrediction) -> float:
+        if 0.0 <= prediction.posterior <= 1.0:
+            return float(prediction.posterior)
+        return float(Evaluator._to_prob(np.array([prediction.score]))[0])
+
+    @staticmethod
+    def _prediction_label(prediction: MembershipPrediction) -> int:
+        return int(prediction.is_member_pred)
+
     def evaluate(self, predictions, access_level=AccessLevel.BLACKBOX, seed=0):
         y_true = np.array([int(p.is_member_true) for p in predictions])
         y_score = np.array([p.score for p in predictions])
+        y_prob = np.array([self._prediction_prob(p) for p in predictions])
         result = ExperimentResult(seed=seed, access_level=access_level, predictions=predictions)
         if len(np.unique(y_true)) < 2:
             return result
@@ -47,7 +58,6 @@ class Evaluator:
         for ft in [1e-3, 1e-4]:
             result.tpr_at_fpr[f"fpr={ft}"] = self._tpr_at_fpr(fpr_arr, tpr_arr, ft)
         # Brier and ECE need probabilities in [0,1]
-        y_prob = self._to_prob(y_score)
         result.brier_score = float(brier_score_loss(y_true, y_prob))
         result.ece = self._ece(y_true, y_prob)
         result.total_queries = sum(p.num_rounds_used for p in predictions)
@@ -96,7 +106,7 @@ class Evaluator:
         report["early_stop_rate"] = sum(1 for p in predictions if p.early_stopped) / len(predictions)
         report["avg_rounds_used"] = float(np.mean([p.num_rounds_used for p in predictions]))
         report["total_queries"] = result.total_queries
-        y_pred = (y_score > 0.0).astype(int)  # raw delta: >0 = member
+        y_pred = np.array([self._prediction_label(p) for p in predictions])
         report["accuracy"] = float((y_pred == y_true).mean())
         report["generated_at"] = datetime.now(timezone.utc).isoformat()
         return report
