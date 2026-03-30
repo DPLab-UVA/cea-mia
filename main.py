@@ -20,6 +20,7 @@ from agent_interface import AgentInterface
 from feature_extractor import FeatureExtractor
 from evidence_accumulator import EvidenceAccumulator
 from evaluation import Evaluator
+from experiment_db import prepare_isolated_memory_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cea_mi")
@@ -41,6 +42,19 @@ class CEAMIExperiment:
         self.accumulator = EvidenceAccumulator(
             prior=self.cfg.prior, early_stop_threshold=self.cfg.early_stop_threshold)
         self.evaluator = Evaluator(bootstrap_n=self.cfg.bootstrap_n, seed=self.cfg.seed)
+
+    def _prepare_isolated_memory_db(self, access_level: str, seed: int) -> Path:
+        isolated_db_path = prepare_isolated_memory_db(
+            source_db_path=self.cfg.nanobot_db_path,
+            output_dir=self.cfg.output_dir,
+            seed=seed,
+            access_level=access_level,
+        )
+        self.agent.db_path = isolated_db_path
+        self.agent._store = None
+        self.agent._recall = None
+        logger.info("Using isolated experiment DB copy: %s", isolated_db_path)
+        return isolated_db_path
 
     async def setup_data(self, seed=None):
         s = seed or self.cfg.seed
@@ -128,6 +142,7 @@ class CEAMIExperiment:
         s = seed or self.cfg.seed
         start = time.time()
         logger.info("=== CEA-MI Experiment: %s, seed=%d ===", access_level, s)
+        self._prepare_isolated_memory_db(access_level, s)
         members, nonmembers, pairs = await self.setup_data(s)
         predictions = await self.run_attack(pairs, access_level)
         report = await self.evaluate_results(predictions, access_level, s)
