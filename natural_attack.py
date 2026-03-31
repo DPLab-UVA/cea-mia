@@ -202,6 +202,37 @@ def build_fact_objects(members, nonmembers, num_per_class, rng):
     return facts
 
 
+def split_fact_pools(members, nonmembers, num_attack_per_class, calibration_per_class, rng):
+    """Sample disjoint attack/calibration pools from the classified dataset."""
+    attack_n = min(num_attack_per_class, len(members), len(nonmembers))
+    if attack_n < num_attack_per_class:
+        log.warning("Only %d per class available (requested %d)", attack_n, num_attack_per_class)
+
+    if calibration_per_class <= 0:
+        return (
+            rng.sample(members, attack_n),
+            rng.sample(nonmembers, attack_n),
+            [],
+            [],
+        )
+
+    required_members = attack_n + calibration_per_class
+    required_nonmembers = attack_n + calibration_per_class
+    if len(members) < required_members or len(nonmembers) < required_nonmembers:
+        raise ValueError(
+            "Not enough held-out facts to calibrate without leaking into evaluation. "
+            f"Need at least {required_members} members and {required_nonmembers} nonmembers."
+        )
+
+    member_pool = rng.sample(members, required_members)
+    nonmember_pool = rng.sample(nonmembers, required_nonmembers)
+    attack_members = member_pool[:attack_n]
+    cal_members = member_pool[attack_n:]
+    attack_nonmembers = nonmember_pool[:attack_n]
+    cal_nonmembers = nonmember_pool[attack_n:]
+    return attack_members, attack_nonmembers, cal_members, cal_nonmembers
+
+
 def build_decoy_fact(fact: Fact, rng: random.Random) -> Fact:
     """Build a plausible counterfactual decoy with proper key_value and topic."""
     topic_key = fact.topic.split("_")[0] if fact.topic else ""
@@ -245,30 +276,63 @@ class NaturalAttack:
         )
         self.evaluator = Evaluator(bootstrap_n=cfg.bootstrap_n, seed=cfg.seed)
 
-    async def _calibration_pass(self, pairs, access_level, n_cal=5):
-        """Run probes on first n_cal member + nonmember facts to calibrate distributions."""
-        member_pairs = [p for p in pairs if p.fact.is_member][:n_cal]
-        nonmem_pairs = [p for p in pairs if not p.fact.is_member][:n_cal]
-        cal_pairs = member_pairs + nonmem_pairs
+    async def _build_decoy_pairs(self, facts):
+        return [DecoyPair(fact=f, decoy=build_decoy_fact(f, self.rng)) for f in facts]
+
+    async def _collect_evidence_trail(self, pair, access_level):
+        probe_pairs = await self.probe_gen.generate_probe_family(pair)
+        if not probe_pairs:
+            return []
+
+        evidence_trail = []
+        for round_idx, probe_batch in enumerate(group_probe_pairs_by_round(probe_pairs)):
+            batch_fact_results = []
+            batch_decoy_results = []
+            for probe_f, probe_d in probe_batch:
+                batch_fact_results.append(await self._execute_probe(probe_f, access_level))
+                batch_decoy_results.append(await self._execute_probe(probe_d, access_level))
+
+            probe_f, _ = probe_batch[0]
+            features = self.feat_ext.extract_round_features(
+                pair.fact, batch_fact_results, batch_decoy_results, probe_f.probe_type)
+            score = self.feat_ext.compute_round_score(features)
+
+            log.info("    round %d (%s): delta=%.4f  sim_f=%.3f sim_d=%.3f",
+                     round_idx, probe_f.probe_type.value, score,
+                     features.get("fact_similarity_mean", 0),
+                     features.get("decoy_similarity_mean", 0))
+
+            evidence_trail.append(RoundEvidence(
+                fact_id=pair.fact.id,
+                round_idx=round_idx,
+                probe_type=probe_f.probe_type,
+                score_fact=features.get("fact_similarity_mean", 0),
+                score_decoy=features.get("decoy_similarity_mean", 0),
+                delta_score=score,
+                features=features,
+                fact_results=batch_fact_results,
+                decoy_results=batch_decoy_results,
+            ))
+        return evidence_trail
+
+    async def _calibration_pass(self, pairs, access_level, n_cal=None):
+        """Run held-out probes and calibrate on the same per-round score used at inference."""
+        member_pairs = [p for p in pairs if p.fact.is_member]
+        nonmem_pairs = [p for p in pairs if not p.fact.is_member]
+        if n_cal is not None:
+            member_pairs = member_pairs[:n_cal]
+            nonmem_pairs = nonmem_pairs[:n_cal]
         if len(member_pairs) < 2 or len(nonmem_pairs) < 2:
             log.warning("Not enough calibration samples, skipping calibration")
             return
 
         member_scores, nonmember_scores = [], []
-        for pair in cal_pairs:
-            probe_pairs = await self.probe_gen.generate_probe_family(pair)
-            round_scores = []
-            for probe_f, probe_d in probe_pairs:
-                result_f = await self._execute_probe(probe_f, access_level)
-                result_d = await self._execute_probe(probe_d, access_level)
-                features = self.feat_ext.extract_round_features(
-                    pair.fact, [result_f], [result_d], probe_f.probe_type)
-                round_scores.append(self.feat_ext.compute_round_score(features))
-            mean_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
+        for pair in member_pairs + nonmem_pairs:
+            round_scores = [e.delta_score for e in await self._collect_evidence_trail(pair, access_level)]
             if pair.fact.is_member:
-                member_scores.append(mean_score)
+                member_scores.extend(round_scores)
             else:
-                nonmember_scores.append(mean_score)
+                nonmember_scores.extend(round_scores)
 
         log.info("Calibration: member_scores=%s", [f"{s:.4f}" for s in member_scores])
         log.info("Calibration: nonmem_scores=%s", [f"{s:.4f}" for s in nonmember_scores])
@@ -277,17 +341,9 @@ class NaturalAttack:
                  self.accumulator.dist.member_mean, self.accumulator.dist.member_std,
                  self.accumulator.dist.nonmember_mean, self.accumulator.dist.nonmember_std)
 
-    async def attack_all(self, facts, access_level, calibrate=True):
+    async def attack_all(self, facts, access_level):
         """Run attack on all facts, return list of MembershipPrediction."""
-        pairs = []
-        for f in facts:
-            decoy = build_decoy_fact(f, self.rng)
-            pairs.append(DecoyPair(fact=f, decoy=decoy))
-
-        # Calibration pass: use first few facts to tune distribution params
-        if calibrate:
-            log.info("--- Running calibration pass ---")
-            await self._calibration_pass(pairs, access_level, n_cal=5)
+        pairs = await self._build_decoy_pairs(facts)
 
         predictions = []
         total = len(pairs)
@@ -310,40 +366,11 @@ class NaturalAttack:
         return predictions
 
     async def _attack_single(self, pair, access_level):
-        probe_pairs = await self.probe_gen.generate_probe_family(pair)
-        if not probe_pairs:
+        evidence_trail = await self._collect_evidence_trail(pair, access_level)
+        if not evidence_trail:
             log.warning("  No probes generated for %s", pair.fact.id)
             return MembershipPrediction(
                 fact_id=pair.fact.id, posterior=0.5, score=0.5)
-
-        evidence_trail = []
-        # Run ALL probe rounds — no early stopping
-        for round_idx, probe_batch in enumerate(group_probe_pairs_by_round(probe_pairs)):
-            batch_fact_results = []
-            batch_decoy_results = []
-            for probe_f, probe_d in probe_batch:
-                batch_fact_results.append(await self._execute_probe(probe_f, access_level))
-                batch_decoy_results.append(await self._execute_probe(probe_d, access_level))
-
-            probe_f, _ = probe_batch[0]
-
-            features = self.feat_ext.extract_round_features(
-                pair.fact, batch_fact_results, batch_decoy_results, probe_f.probe_type)
-            score = self.feat_ext.compute_round_score(features)
-
-            log.info("    round %d (%s): delta=%.4f  sim_f=%.3f sim_d=%.3f",
-                     round_idx, probe_f.probe_type.value, score,
-                     features.get("fact_similarity_mean", 0),
-                     features.get("decoy_similarity_mean", 0))
-
-            evidence = RoundEvidence(
-                fact_id=pair.fact.id, round_idx=round_idx,
-                probe_type=probe_f.probe_type,
-                score_fact=features.get("fact_similarity_mean", 0),
-                score_decoy=features.get("decoy_similarity_mean", 0),
-                delta_score=score, features=features,
-                fact_results=batch_fact_results, decoy_results=batch_decoy_results)
-            evidence_trail.append(evidence)
 
         pred = self.accumulator.accumulate(evidence_trail)
         # Also compute raw mean delta as an alternative score
@@ -428,20 +455,52 @@ async def amain():
     for n in nonmembers[:3]:
         log.info("  %s (best_score=%.3f)", n["fact_raw"], n["match_score"])
 
+    calibration_per_class = 5 if do_calibrate else 0
     all_reports = []
     for seed in seeds:
         cfg.seed = seed
         rng = random.Random(seed)
 
+        # 2. Sample disjoint attack/calibration pools
+        calibration_facts = []
+        run_calibration = do_calibrate
+        try:
+            attack_members, attack_nonmembers, cal_members, cal_nonmembers = split_fact_pools(
+                members,
+                nonmembers,
+                num_attack_per_class=args.num_facts,
+                calibration_per_class=calibration_per_class,
+                rng=rng,
+            )
+        except ValueError as exc:
+            log.warning("%s Skipping calibration for this run.", exc)
+            attack_members, attack_nonmembers, cal_members, cal_nonmembers = split_fact_pools(
+                members,
+                nonmembers,
+                num_attack_per_class=args.num_facts,
+                calibration_per_class=0,
+                rng=rng,
+            )
+            run_calibration = False
+
+        facts = build_fact_objects(attack_members, attack_nonmembers, args.num_facts, rng)
+        if cal_members or cal_nonmembers:
+            calibration_facts = build_fact_objects(
+                cal_members,
+                cal_nonmembers,
+                min(len(cal_members), len(cal_nonmembers)),
+                rng,
+            )
+        else:
+            run_calibration = False
+
         log.info("=" * 60)
         log.info("CEA-MI Natural Memory Attack (v4 — confirmation probes + calibration)")
         log.info("Access: %s | Facts/class: %d | Seed: %d | Calibrate: %s",
-                 args.access, args.num_facts, seed, do_calibrate)
+                 args.access, args.num_facts, seed, run_calibration)
         log.info("DB: %s", db_path)
         log.info("=" * 60)
 
-        # 2. Sample and build Fact objects
-        facts = build_fact_objects(members, nonmembers, args.num_facts, rng)
         n_mem = sum(1 for f in facts if f.is_member)
         n_nonmem = sum(1 for f in facts if not f.is_member)
         log.info("Attack set: %d members + %d nonmembers = %d total", n_mem, n_nonmem, len(facts))
@@ -450,7 +509,14 @@ async def amain():
         start = time.time()
         attacker = NaturalAttack(cfg, rng)
         try:
-            predictions = await attacker.attack_all(facts, args.access, calibrate=do_calibrate)
+            if run_calibration and calibration_facts:
+                log.info("--- Running calibration pass on %d held-out facts ---", len(calibration_facts))
+                calibration_pairs = await attacker._build_decoy_pairs(calibration_facts)
+                await attacker._calibration_pass(calibration_pairs, args.access)
+            elif do_calibrate:
+                log.warning("Calibration requested but no held-out facts were available; using default distributions")
+
+            predictions = await attacker.attack_all(facts, args.access)
             output_dir = cfg.output_dir / ("natural_%s_seed%d_v4" % (args.access, seed))
             report = await attacker.evaluate(predictions, args.access, seed, output_dir)
             elapsed = time.time() - start
@@ -485,10 +551,10 @@ async def amain():
                 "num_per_class_used": n_mem,
                 "similarity_threshold": args.threshold,
                 "runtime_seconds": elapsed,
-                "calibration": do_calibrate,
+                "calibration": run_calibration,
                 "improvements": [
                     "confirmation probes (value-specific: 'My partner is Jamie, right?')",
-                    "calibration pass (first 5 per class to tune distributions)",
+                    "held-out calibration pass (5 per class, excluded from evaluation)",
                     "multi-seed support (--multi-seed for seeds 42,123,456)",
                     "delta_latency normalized (÷2000, clipped [-1,1])",
                     "delta_logprob normalized (÷5, clipped [-1,1])",
