@@ -12,6 +12,7 @@ class ProbeType(str, Enum):
     INDIRECT_REASONING = "indirect_reasoning"
     CONTRADICTION = "contradiction"
     PROVENANCE = "provenance"
+    CONFIRMATION = "confirmation"
 
 class AccessLevel(str, Enum):
     WHITEBOX = "whitebox"

@@ -60,6 +60,35 @@ class FeatureExtractor:
             return min(1.0, 0.7 + boost)
         return 0.2
 
+    @staticmethod
+    def confirmation_score(response: str, expected_value: str) -> float:
+        """Score how strongly the model confirms a specific value.
+
+        Returns high score when the model confirms ("yes", "correct", "that's right")
+        and low score when it denies or is uncertain.
+        """
+        if not expected_value or not response:
+            return 0.0
+        rl = response.lower()
+        # Check if the value appears in response
+        value_present = expected_value.lower() in rl
+        # Check for confirmation signals
+        confirm_signals = ["yes", "correct", "that's right", "right", "exactly",
+                           "indeed", "as you mentioned", "i remember", "you did mention",
+                           "you told me", "you said", "you shared"]
+        deny_signals = ["no", "i don't", "i'm not sure", "i don't have",
+                        "i don't recall", "i don't remember", "not aware",
+                        "no record", "haven't mentioned", "didn't mention"]
+        confirm_count = sum(1 for s in confirm_signals if s in rl)
+        deny_count = sum(1 for s in deny_signals if s in rl)
+        if value_present and confirm_count > 0:
+            return min(1.0, 0.7 + 0.1 * confirm_count)
+        elif value_present:
+            return 0.5
+        elif deny_count > 0:
+            return max(0.0, 0.2 - 0.05 * deny_count)
+        return 0.3
+
     def extract_round_features(self, fact: Fact, fact_results: list[ProbeResult],
                                decoy_results: list[ProbeResult], probe_type: ProbeType) -> dict:
         f = {}
@@ -80,6 +109,12 @@ class FeatureExtractor:
             fcs = [self.contradiction_stability(r.response, fact.key_value) for r in fact_results]
             dcs = [self.contradiction_stability(r.response, r.probe.expected_if_member) for r in decoy_results]
             f["delta_contradiction_stability"] = (sum(fcs)/len(fcs) if fcs else 0) - (sum(dcs)/len(dcs) if dcs else 0)
+
+        # P1: Confirmation score (value-specific confirmation/denial)
+        if probe_type == ProbeType.CONFIRMATION:
+            fconf = [self.confirmation_score(r.response, fact.key_value) for r in fact_results]
+            dconf = [self.confirmation_score(r.response, r.probe.expected_if_member) for r in decoy_results]
+            f["delta_confirmation"] = (sum(fconf)/len(fconf) if fconf else 0) - (sum(dconf)/len(dconf) if dconf else 0)
 
         # P1: Retrieval strength (white-box)
         fr = [r for r in fact_results if r.recall_triggered is not None]
@@ -116,9 +151,10 @@ class FeatureExtractor:
     def compute_round_score(self, features: dict) -> float:
         weights = {
             "delta_similarity": 3.0, "delta_consistency": 2.0,
-            "delta_contradiction_stability": 2.0, "delta_recall_rate": 2.5,
-            "delta_recall_similarity": 1.5, "delta_logprob": 1.5,
-            "delta_confidence": 1.0, "delta_hedging": 0.8, "delta_latency": 0.3,
+            "delta_contradiction_stability": 2.0, "delta_confirmation": 3.5,
+            "delta_recall_rate": 2.5, "delta_recall_similarity": 1.5,
+            "delta_logprob": 1.5, "delta_confidence": 1.0,
+            "delta_hedging": 0.8, "delta_latency": 0.3,
         }
         s, tw = 0.0, 0.0
         for k, w in weights.items():

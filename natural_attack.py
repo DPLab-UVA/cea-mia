@@ -247,15 +247,49 @@ class NaturalAttack:
         )
         self.evaluator = Evaluator(bootstrap_n=cfg.bootstrap_n, seed=cfg.seed)
 
-    async def attack_all(self, facts, access_level):
+    async def _calibration_pass(self, pairs, access_level, n_cal=5):
+        """Run probes on first n_cal member + nonmember facts to calibrate distributions."""
+        member_pairs = [p for p in pairs if p.fact.is_member][:n_cal]
+        nonmem_pairs = [p for p in pairs if not p.fact.is_member][:n_cal]
+        cal_pairs = member_pairs + nonmem_pairs
+        if len(member_pairs) < 2 or len(nonmem_pairs) < 2:
+            log.warning("Not enough calibration samples, skipping calibration")
+            return
+
+        member_scores, nonmember_scores = [], []
+        for pair in cal_pairs:
+            probe_pairs = await self.probe_gen.generate_probe_family(pair)
+            round_scores = []
+            for probe_f, probe_d in probe_pairs:
+                result_f = await self._execute_probe(probe_f, access_level)
+                result_d = await self._execute_probe(probe_d, access_level)
+                features = self.feat_ext.extract_round_features(
+                    pair.fact, [result_f], [result_d], probe_f.probe_type)
+                round_scores.append(self.feat_ext.compute_round_score(features))
+            mean_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
+            if pair.fact.is_member:
+                member_scores.append(mean_score)
+            else:
+                nonmember_scores.append(mean_score)
+
+        log.info("Calibration: member_scores=%s", [f"{s:.4f}" for s in member_scores])
+        log.info("Calibration: nonmem_scores=%s", [f"{s:.4f}" for s in nonmember_scores])
+        self.accumulator.calibrate_from_data(member_scores, nonmember_scores)
+        log.info("Calibrated distributions: member(%.4f, %.4f) nonmember(%.4f, %.4f)",
+                 self.accumulator.dist.member_mean, self.accumulator.dist.member_std,
+                 self.accumulator.dist.nonmember_mean, self.accumulator.dist.nonmember_std)
+
+    async def attack_all(self, facts, access_level, calibrate=True):
         """Run attack on all facts, return list of MembershipPrediction."""
         pairs = []
         for f in facts:
             decoy = build_decoy_fact(f, self.rng)
             pairs.append(DecoyPair(fact=f, decoy=decoy))
 
-        # Optional: calibration pass on first few facts
-        # (skip for now, use tuned priors)
+        # Calibration pass: use first few facts to tune distribution params
+        if calibrate:
+            log.info("--- Running calibration pass ---")
+            await self._calibration_pass(pairs, access_level, n_cal=5)
 
         predictions = []
         total = len(pairs)
@@ -351,22 +385,21 @@ async def amain():
     parser.add_argument("--db", default=None, help="PMC db path (default: from config)")
     parser.add_argument("--threshold", type=float, default=0.20,
                         help="token overlap threshold for member classification")
+    parser.add_argument("--multi-seed", action="store_true",
+                        help="run across seeds 42,123,456 and aggregate")
+    parser.add_argument("--no-calibrate", action="store_true",
+                        help="skip calibration pass")
     args = parser.parse_args()
 
     cfg = Config()
-    cfg.seed = args.seed
-    rng = random.Random(args.seed)
     db_path = Path(args.db) if args.db else cfg.nanobot_db_path
     dataset_path = Path(args.dataset)
+    do_calibrate = not args.no_calibrate
 
-    log.info("=" * 60)
-    log.info("CEA-MI Natural Memory Attack (v3 — fixed features + no early stop)")
-    log.info("Access: %s | Facts/class: %d | Seed: %d", args.access, args.num_facts, args.seed)
-    log.info("DB: %s", db_path)
-    log.info("Dataset: %s", dataset_path)
-    log.info("=" * 60)
+    # Determine seeds
+    seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
-    # 1. Load and classify
+    # 1. Load and classify (shared across seeds)
     memories = load_semantic_memories(db_path)
     dataset_facts = load_dataset_facts(dataset_path)
     members, nonmembers = classify_facts(dataset_facts, memories, args.threshold)
@@ -378,7 +411,6 @@ async def amain():
         log.error("All facts matched — try lowering --threshold")
         sys.exit(1)
 
-    # Log some match examples
     log.info("--- Member examples ---")
     for m in members[:3]:
         log.info("  %s -> matched: %s (score=%.3f)", m["fact_raw"], m.get("matched_memory","")[:60], m["match_score"])
@@ -386,64 +418,100 @@ async def amain():
     for n in nonmembers[:3]:
         log.info("  %s (best_score=%.3f)", n["fact_raw"], n["match_score"])
 
-    # 2. Sample and build Fact objects
-    facts = build_fact_objects(members, nonmembers, args.num_facts, rng)
-    n_mem = sum(1 for f in facts if f.is_member)
-    n_nonmem = sum(1 for f in facts if not f.is_member)
-    log.info("Attack set: %d members + %d nonmembers = %d total", n_mem, n_nonmem, len(facts))
+    all_reports = []
+    for seed in seeds:
+        cfg.seed = seed
+        rng = random.Random(seed)
 
-    # 3. Run attack
-    start = time.time()
-    attacker = NaturalAttack(cfg, rng)
-    try:
-        predictions = await attacker.attack_all(facts, args.access)
-        output_dir = cfg.output_dir / ("natural_%s_seed%d_v3" % (args.access, args.seed))
-        report = await attacker.evaluate(predictions, args.access, args.seed, output_dir)
-        elapsed = time.time() - start
-
-        # Print results
         log.info("=" * 60)
-        log.info("RESULTS (v3)")
+        log.info("CEA-MI Natural Memory Attack (v4 — confirmation probes + calibration)")
+        log.info("Access: %s | Facts/class: %d | Seed: %d | Calibrate: %s",
+                 args.access, args.num_facts, seed, do_calibrate)
+        log.info("DB: %s", db_path)
         log.info("=" * 60)
-        roc = report.get("roc_auc", {})
-        if isinstance(roc, dict):
-            log.info("ROC-AUC:  %.4f (95%% CI: %.4f-%.4f)",
-                     roc.get("value", 0), roc.get("ci_lower", 0), roc.get("ci_upper", 0))
-        pr = report.get("pr_auc", {})
-        if isinstance(pr, dict):
-            log.info("PR-AUC:   %.4f", pr.get("value", 0))
-        log.info("Accuracy: %.4f", report.get("accuracy", 0))
-        log.info("Brier:    %.4f", report.get("brier_score", 0))
-        log.info("ECE:      %.4f", report.get("ece", 0))
-        log.info("Avg rounds: %.2f  Early stop: %.1f%%",
-                 report.get("avg_rounds_used", 0), report.get("early_stop_rate", 0) * 100)
-        log.info("Queries:  %s", report.get("total_queries", "N/A"))
-        log.info("Runtime:  %.1fs", elapsed)
-        log.info("Output:   %s", output_dir)
 
-        # Save metadata
-        meta = {
-            "version": "v3_fixed_features_no_early_stop",
-            "num_semantic_memories": len(memories),
-            "num_dataset_facts": len(dataset_facts),
-            "num_members_found": len(members),
-            "num_nonmembers_found": len(nonmembers),
-            "num_per_class_used": n_mem,
-            "similarity_threshold": args.threshold,
-            "runtime_seconds": elapsed,
-            "fixes": [
-                "delta_latency normalized (÷2000, clipped [-1,1])",
-                "delta_logprob normalized (÷5, clipped [-1,1])",
-                "early stopping disabled (threshold=1.0)",
-                "ROC score = raw mean delta (not LLR posterior)",
-            ],
-        }
-        with open(output_dir / "meta.json", "w") as f:
-            json.dump(meta, f, indent=2)
+        # 2. Sample and build Fact objects
+        facts = build_fact_objects(members, nonmembers, args.num_facts, rng)
+        n_mem = sum(1 for f in facts if f.is_member)
+        n_nonmem = sum(1 for f in facts if not f.is_member)
+        log.info("Attack set: %d members + %d nonmembers = %d total", n_mem, n_nonmem, len(facts))
 
-        print(json.dumps(report, indent=2, default=str))
-    finally:
-        await attacker.cleanup()
+        # 3. Run attack
+        start = time.time()
+        attacker = NaturalAttack(cfg, rng)
+        try:
+            predictions = await attacker.attack_all(facts, args.access, calibrate=do_calibrate)
+            output_dir = cfg.output_dir / ("natural_%s_seed%d_v4" % (args.access, seed))
+            report = await attacker.evaluate(predictions, args.access, seed, output_dir)
+            elapsed = time.time() - start
+
+            # Print results
+            log.info("=" * 60)
+            log.info("RESULTS (v4, seed=%d)", seed)
+            log.info("=" * 60)
+            roc = report.get("roc_auc", {})
+            if isinstance(roc, dict):
+                log.info("ROC-AUC:  %.4f (95%% CI: %.4f-%.4f)",
+                         roc.get("value", 0), roc.get("ci_lower", 0), roc.get("ci_upper", 0))
+            pr = report.get("pr_auc", {})
+            if isinstance(pr, dict):
+                log.info("PR-AUC:   %.4f", pr.get("value", 0))
+            log.info("Accuracy: %.4f", report.get("accuracy", 0))
+            log.info("Brier:    %.4f", report.get("brier_score", 0))
+            log.info("ECE:      %.4f", report.get("ece", 0))
+            log.info("Avg rounds: %.2f  Early stop: %.1f%%",
+                     report.get("avg_rounds_used", 0), report.get("early_stop_rate", 0) * 100)
+            log.info("Queries:  %s", report.get("total_queries", "N/A"))
+            log.info("Runtime:  %.1fs", elapsed)
+            log.info("Output:   %s", output_dir)
+
+            # Save metadata
+            meta = {
+                "version": "v4_confirmation_probes_calibration",
+                "num_semantic_memories": len(memories),
+                "num_dataset_facts": len(dataset_facts),
+                "num_members_found": len(members),
+                "num_nonmembers_found": len(nonmembers),
+                "num_per_class_used": n_mem,
+                "similarity_threshold": args.threshold,
+                "runtime_seconds": elapsed,
+                "calibration": do_calibrate,
+                "improvements": [
+                    "confirmation probes (value-specific: 'My partner is Jamie, right?')",
+                    "calibration pass (first 5 per class to tune distributions)",
+                    "multi-seed support (--multi-seed for seeds 42,123,456)",
+                    "delta_latency normalized (÷2000, clipped [-1,1])",
+                    "delta_logprob normalized (÷5, clipped [-1,1])",
+                    "early stopping disabled (threshold=1.0)",
+                    "ROC score = raw mean delta (not LLR posterior)",
+                ],
+            }
+            with open(output_dir / "meta.json", "w") as f:
+                json.dump(meta, f, indent=2)
+
+            report["seed"] = seed
+            all_reports.append(report)
+            print(json.dumps(report, indent=2, default=str))
+        finally:
+            await attacker.cleanup()
+
+    # Aggregate multi-seed results
+    if len(all_reports) > 1:
+        log.info("=" * 60)
+        log.info("AGGREGATED RESULTS (v4, %d seeds)", len(all_reports))
+        log.info("=" * 60)
+        import numpy as _np
+        for metric in ["accuracy", "brier_score", "ece"]:
+            vals = [r.get(metric, 0) for r in all_reports]
+            log.info("  %s: mean=%.4f std=%.4f", metric, _np.mean(vals), _np.std(vals))
+        for metric in ["roc_auc", "pr_auc"]:
+            vals = [r.get(metric, {}).get("value", 0) if isinstance(r.get(metric), dict) else 0 for r in all_reports]
+            log.info("  %s: mean=%.4f std=%.4f", metric, _np.mean(vals), _np.std(vals))
+        agg = {"seeds": seeds, "access_level": args.access, "per_seed": all_reports}
+        agg_dir = cfg.output_dir / ("natural_%s_aggregate_v4" % args.access)
+        agg_dir.mkdir(parents=True, exist_ok=True)
+        with open(agg_dir / "aggregate_report.json", "w") as f:
+            json.dump(agg, f, indent=2, default=str)
 
 
 if __name__ == "__main__":

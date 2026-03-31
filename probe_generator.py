@@ -78,6 +78,44 @@ class ProbeGenerator:
                      question=f"You seem to know things about me. What do you know about my {topic} and where did that info come from?",
                      expected_if_member=fact.key_value, perspective_idx=4, paraphrase_idx=idx)
 
+    def _confirmation_probe(self, fact: Fact, idx=0) -> Probe:
+        """Value-specific confirmation probe: 'My partner is Jamie, right?'
+
+        Forces the model to confirm or deny a specific value, creating strong
+        differential signal between members and non-members. For members, the
+        model should confirm the real value and deny the decoy. For non-members,
+        the model should be uncertain about both.
+        """
+        topic = fact.topic.split("_")[0]
+        value = fact.key_value
+        templates = {
+            "partner": f"I mentioned before that my partner is {value}, right?",
+            "pet": f"You remember that I have {value}, correct?",
+            "city": f"I live in {value}, as I told you before, right?",
+            "job": f"My role is {value}, as we discussed, correct?",
+            "coffee": f"You know I prefer {value}, right?",
+            "language": f"I primarily code in {value}, as I mentioned, right?",
+            "editor": f"I use {value} as my main editor, correct?",
+            "hobby": f"My hobby is {value}, as I shared with you, right?",
+            "music": f"I'm into {value} music, as I told you, right?",
+            "food": f"I love {value} food, as we discussed, right?",
+            "framework": f"We use {value} for our ML work, correct?",
+            "database": f"Our main database is {value}, right?",
+            "cloud": f"We run on {value}, as I mentioned, correct?",
+            "gpu": f"Our GPU setup is {value}, right?",
+            "university": f"I graduated from {value}, correct?",
+            "birthday": f"My birthday is {value}, right?",
+            "os": f"I use {value} as my main OS, correct?",
+            "meeting": f"Our team meeting is on {value}, as I mentioned, right?",
+            "restaurant": f"My favorite restaurant is {value}, correct?",
+            "headphones": f"I use {value} headphones, right?",
+            "name": f"My name is {value}, as I told you, right?",
+        }
+        question = templates.get(topic, f"You remember that my {topic} is {value}, correct?")
+        return Probe(fact_id=fact.id, probe_type=ProbeType.CONFIRMATION,
+                     question=question, expected_if_member=fact.key_value,
+                     perspective_idx=5, paraphrase_idx=idx)
+
     async def _generate_paraphrases(self, base_question: str, n=3) -> list[str]:
         prompt = f"Rephrase this question {n} different ways. Keep the same meaning. Output ONLY the questions, one per line, numbered.\n\nOriginal: {base_question}"
         try:
@@ -130,6 +168,12 @@ class ProbeGenerator:
         pdp = self._provenance_probe(decoy)
         pdp.fact_id = fact.id
         probe_pairs.append((pfp, pdp))
+
+        # 6. Confirmation (value-specific: "My partner is Jamie, right?")
+        pfc = self._confirmation_probe(fact)
+        pdc = self._confirmation_probe(decoy)
+        pdc.fact_id = fact.id
+        probe_pairs.append((pfc, pdc))
 
         return probe_pairs
 
