@@ -15,10 +15,10 @@ Usage:
     python setup_memgpt.py serve
 
     # 3. Ingest benchmark facts
-    python setup_memgpt.py ingest --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_memgpt.py ingest --dataset /path/to/benchmark_v2_dataset.json
 
     # 4. Run CEA-MI attack
-    python memgpt_attack.py --access blackbox --num-facts 30 --seed 42
+    python memgpt_attack.py --access blackbox --num-facts 30 --seed 42 --dataset /path/to/benchmark_v2_dataset.json
 """
 from __future__ import annotations
 import argparse
@@ -239,9 +239,9 @@ class EmbeddingMemoryAgent:
         return result
 
 
-def setup_standalone(dataset_path: str, num_conversations: int = None):
+def setup_standalone(dataset_path: str, num_conversations: int = None, memory_file: str | None = None):
     """Set up the standalone embedding-based agent and ingest facts."""
-    agent = EmbeddingMemoryAgent()
+    agent = EmbeddingMemoryAgent(db_path=memory_file or "memgpt_memories.json")
 
     with open(dataset_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -287,6 +287,7 @@ if __name__ == "__main__":
     p_standalone = sub.add_parser("standalone", help="Standalone embedding agent (no Letta)")
     p_standalone.add_argument("--dataset", required=True)
     p_standalone.add_argument("--num-conversations", type=int, default=None)
+    p_standalone.add_argument("--memory-file", default=None)
 
     args = parser.parse_args()
 
@@ -297,6 +298,6 @@ if __name__ == "__main__":
     elif args.cmd == "serve":
         serve()
     elif args.cmd == "standalone":
-        setup_standalone(args.dataset, args.num_conversations)
+        setup_standalone(args.dataset, args.num_conversations, args.memory_file)
     else:
         parser.print_help()

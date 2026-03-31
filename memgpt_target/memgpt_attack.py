@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import sys
 import time
@@ -30,7 +31,7 @@ from pathlib import Path
 # Add parent directory to path for CEA-MI imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import Config
+from config import Config, DEFAULT_DATASET_PATH
 from models import (Fact, DecoyPair, Probe, ProbeResult, ProbeType,
                     RoundEvidence, MembershipPrediction, AccessLevel)
 from probe_generator import ProbeGenerator
@@ -204,15 +205,28 @@ async def amain():
     parser.add_argument("--access", choices=["blackbox", "graybox", "whitebox"], default="blackbox")
     parser.add_argument("--num-facts", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dataset", default="/bigtemp/trv3px/benchmark_v2_dataset.json")
-    parser.add_argument("--memory-file", default="memgpt_memories.json")
+    parser.add_argument("--dataset", default=str(DEFAULT_DATASET_PATH) if DEFAULT_DATASET_PATH else None)
+    parser.add_argument(
+        "--memory-file",
+        default=os.environ.get(
+            "CEA_MI_MEMGPT_MEMORY_FILE",
+            str(Path(__file__).resolve().parent / "memgpt_memories.json"),
+        ),
+    )
     parser.add_argument("--threshold", type=float, default=0.4)
     parser.add_argument("--multi-seed", action="store_true")
     parser.add_argument("--no-calibrate", action="store_true")
     args = parser.parse_args()
 
     cfg = Config()
+    if not args.dataset:
+        parser.error(
+            "A benchmark dataset JSON is required. Pass --dataset /path/to/benchmark_v2_dataset.json "
+            "or set CEA_MI_DATASET."
+        )
     dataset_path = Path(args.dataset)
+    if not dataset_path.exists():
+        parser.error(f"Dataset file does not exist: {dataset_path}")
     do_calibrate = not args.no_calibrate
     seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
