@@ -1,18 +1,34 @@
 #!/bin/bash
-# CEA-MI v4 attack — confirmation probes + calibration
-source activate nanobot
-cd /bigtemp/trv3px/cea_mi
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="${CEA_MI_LOG_DIR:-$SCRIPT_DIR/results/logs}"
+DB_PATH="${CEA_MI_NANOBOT_DB_PATH:-$HOME/.nanobot/memory/pmc.db}"
+DATASET_PATH="${CEA_MI_DATASET:-}"
+
+mkdir -p "$LOG_DIR"
+cd "$SCRIPT_DIR"
+
+if [[ -z "$DATASET_PATH" ]]; then
+  echo "CEA_MI_DATASET must point to benchmark_v2_dataset.json before running natural_attack.py" >&2
+  exit 1
+fi
+
+if [[ ! -f "$DATASET_PATH" ]]; then
+  echo "Dataset file does not exist: $DATASET_PATH" >&2
+  exit 1
+fi
 
 echo "=== Starting blackbox v4 ==="
-python3 natural_attack.py --access blackbox --num-facts 30 --seed 42 --db ~/.nanobot/memory/pmc.db 2>&1 | tee /bigtemp/trv3px/attack_v4_blackbox.log
+python3 natural_attack.py --access blackbox --num-facts 30 --seed 42 --db "$DB_PATH" --dataset "$DATASET_PATH" 2>&1 | tee "$LOG_DIR/attack_v4_blackbox.log"
 echo "=== Blackbox done ==="
 
 echo "=== Starting graybox v4 ==="
-python3 natural_attack.py --access graybox --num-facts 30 --seed 42 --db ~/.nanobot/memory/pmc.db 2>&1 | tee /bigtemp/trv3px/attack_v4_graybox.log
+python3 natural_attack.py --access graybox --num-facts 30 --seed 42 --db "$DB_PATH" --dataset "$DATASET_PATH" 2>&1 | tee "$LOG_DIR/attack_v4_graybox.log"
 echo "=== Graybox done ==="
 
 echo "=== Starting whitebox v4 ==="
-python3 natural_attack.py --access whitebox --num-facts 30 --seed 42 --db ~/.nanobot/memory/pmc.db 2>&1 | tee /bigtemp/trv3px/attack_v4_whitebox.log
+python3 natural_attack.py --access whitebox --num-facts 30 --seed 42 --db "$DB_PATH" --dataset "$DATASET_PATH" 2>&1 | tee "$LOG_DIR/attack_v4_whitebox.log"
 echo "=== Whitebox done ==="
 
 echo "=== ALL V4 ATTACKS DONE ==="
