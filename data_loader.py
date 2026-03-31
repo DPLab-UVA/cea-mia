@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
+from config import DEFAULT_DATA_DIR
 from models import Fact, DecoyPair
 
 
@@ -41,7 +42,7 @@ class DataLoader:
     def __init__(self, seed: int = 42, data_dir: Optional[Path] = None):
         self.rng = random.Random(seed)
         self.seed = seed
-        self.data_dir = data_dir or Path("/bigtemp/trv3px/cea_mi/data")
+        self.data_dir = Path(data_dir).expanduser() if data_dir else DEFAULT_DATA_DIR
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def generate_facts(self, num_member: int = 50, num_nonmember: int = 50) -> tuple[list[Fact], list[Fact]]:

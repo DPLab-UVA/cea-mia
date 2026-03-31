@@ -5,10 +5,6 @@ import json
 import logging
 import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, "/bigtemp/trv3px/cea_mi")
-sys.path.insert(0, "/bigtemp/trv3px")
 
 from config import Config
 from models import (Fact, DecoyPair, Probe, ProbeResult, ProbeType,

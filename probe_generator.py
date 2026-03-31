@@ -2,11 +2,13 @@
 from __future__ import annotations
 import asyncio
 import httpx
+
+from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
 from models import Fact, Probe, ProbeType, DecoyPair
 
 class ProbeGenerator:
-    def __init__(self, api_base="http://cheetah04:8000/v1", api_key="token-vllm",
-                 model="/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+    def __init__(self, api_base=DEFAULT_API_BASE, api_key=DEFAULT_API_KEY,
+                 model=DEFAULT_MODEL,
                  num_paraphrases=3):
         self.api_base = api_base
         self.api_key = api_key

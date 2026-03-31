@@ -12,13 +12,37 @@ from typing import Any, Optional
 
 import httpx
 
-# Add nanobot to path
 import sys
-sys.path.insert(0, "/bigtemp/trv3px")
 
-from nanobot.memory.store import MemoryStore
-from nanobot.memory.recall import Recall, RecallResult, _tokenize, _relevance
-from nanobot.memory.models import SemanticMemory, EpisodicMemory
+from config import (
+    DEFAULT_API_BASE,
+    DEFAULT_API_KEY,
+    DEFAULT_MODEL,
+    DEFAULT_NANOBOT_DB_PATH,
+    DEFAULT_NANOBOT_PROJECT,
+)
+
+if str(DEFAULT_NANOBOT_PROJECT) not in sys.path:
+    sys.path.insert(0, str(DEFAULT_NANOBOT_PROJECT))
+
+NANOBOT_IMPORT_ERROR: Optional[Exception] = None
+try:
+    from nanobot.memory.store import MemoryStore
+    from nanobot.memory.recall import Recall, RecallResult, _tokenize, _relevance
+    from nanobot.memory.models import SemanticMemory, EpisodicMemory
+except ModuleNotFoundError as exc:
+    NANOBOT_IMPORT_ERROR = exc
+    MemoryStore = Recall = RecallResult = SemanticMemory = EpisodicMemory = Any
+    _tokenize = _relevance = None
+
+
+def _require_nanobot() -> None:
+    if NANOBOT_IMPORT_ERROR is None:
+        return
+    raise RuntimeError(
+        "nanobot is not importable. Set CEA_MI_NANOBOT_PROJECT to a checkout that "
+        "contains the nanobot package, or install nanobot into the active Python environment."
+    ) from NANOBOT_IMPORT_ERROR
 
 
 class AgentInterface:
@@ -26,9 +50,9 @@ class AgentInterface:
 
     def __init__(
         self,
-        api_base: str = "http://cheetah04:8000/v1",
-        api_key: str = "token-vllm",
-        model: str = "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+        api_base: str = DEFAULT_API_BASE,
+        api_key: str = DEFAULT_API_KEY,
+        model: str = DEFAULT_MODEL,
         db_path: Optional[Path] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
@@ -36,7 +60,7 @@ class AgentInterface:
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
-        self.db_path = db_path or (Path.home() / ".nanobot" / "memory" / "pmc.db")
+        self.db_path = db_path or DEFAULT_NANOBOT_DB_PATH
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.client = httpx.AsyncClient(timeout=120)
@@ -46,6 +70,7 @@ class AgentInterface:
 
     @property
     def store(self) -> MemoryStore:
+        _require_nanobot()
         if self._store is None:
             self._store = MemoryStore(self.db_path)
             self._recall = Recall(self._store)
@@ -61,6 +86,7 @@ class AgentInterface:
 
     def inject_semantic_memory(self, content: str, tags: list[str] = None) -> str:
         """Inject a fact directly into semantic memory. Returns memory ID."""
+        _require_nanobot()
         mem = SemanticMemory(
             content=content,
             tags=tags or [],
@@ -105,6 +131,7 @@ class AgentInterface:
 
     def get_recall_scores(self, query: str) -> list[dict]:
         """White-box: get detailed recall scoring for a query."""
+        _require_nanobot()
         query_tokens = _tokenize(query)
         results = []
         for s in self.store.get_all_semantic():
