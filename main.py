@@ -21,6 +21,7 @@ from feature_extractor import FeatureExtractor
 from evidence_accumulator import EvidenceAccumulator
 from evaluation import Evaluator
 from experiment_db import prepare_isolated_memory_db
+from probe_batches import group_probe_pairs_by_round
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cea_mi")
@@ -100,11 +101,17 @@ class CEAMIExperiment:
         max_rounds = {"whitebox": self.cfg.max_rounds_whitebox,
                       "graybox": self.cfg.max_rounds_graybox,
                       "blackbox": self.cfg.max_rounds_blackbox}.get(access_level, 40)
-        for round_idx, (probe_f, probe_d) in enumerate(probe_pairs[:max_rounds]):
-            result_f = await self._execute_probe(probe_f, access_level)
-            result_d = await self._execute_probe(probe_d, access_level)
+        grouped_probe_pairs = group_probe_pairs_by_round(probe_pairs, max_rounds=max_rounds)
+        for round_idx, probe_batch in enumerate(grouped_probe_pairs):
+            batch_fact_results = []
+            batch_decoy_results = []
+            for probe_f, probe_d in probe_batch:
+                batch_fact_results.append(await self._execute_probe(probe_f, access_level))
+                batch_decoy_results.append(await self._execute_probe(probe_d, access_level))
+
+            probe_f, _ = probe_batch[0]
             features = self.feat_ext.extract_round_features(
-                pair.fact, [result_f], [result_d], probe_f.probe_type)
+                pair.fact, batch_fact_results, batch_decoy_results, probe_f.probe_type)
             score = self.feat_ext.compute_round_score(features)
             evidence = RoundEvidence(
                 fact_id=pair.fact.id, round_idx=round_idx,
@@ -112,7 +119,7 @@ class CEAMIExperiment:
                 score_fact=features.get("fact_similarity_mean", 0),
                 score_decoy=features.get("decoy_similarity_mean", 0),
                 delta_score=score, features=features,
-                fact_results=[result_f], decoy_results=[result_d])
+                fact_results=batch_fact_results, decoy_results=batch_decoy_results)
             evidence_trail.append(evidence)
             temp_pred = self.accumulator.accumulate(evidence_trail)
             if temp_pred.early_stopped:
