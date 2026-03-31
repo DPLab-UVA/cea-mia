@@ -52,6 +52,72 @@ class MemGPTPortabilityTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("--memory-file", proc.stdout)
 
+    def test_setup_memgpt_create_agent_uses_configured_backend(self):
+        env = self._base_env()
+        env["CEA_MI_API_BASE"] = "http://example.test:9000/v1"
+        env["CEA_MI_MODEL"] = "portable-model-id"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "\n".join([
+                    "import json, sys, types",
+                    "class FakeClient:",
+                    "    def create_agent(self, **kwargs):",
+                    "        print(json.dumps(kwargs['llm_config']))",
+                    "        return types.SimpleNamespace(id='agent-1')",
+                    "fake = types.ModuleType('letta')",
+                    "fake.create_client = lambda: FakeClient()",
+                    "sys.modules['letta'] = fake",
+                    "from memgpt_target.setup_memgpt import create_agent",
+                    "create_agent()",
+                ]),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"model_endpoint": "http://example.test:9000/v1"', proc.stdout)
+        self.assertIn('"model": "portable-model-id"', proc.stdout)
+
+    def test_embedding_memory_agent_defaults_to_configured_backend(self):
+        env = self._base_env()
+        env["CEA_MI_API_BASE"] = "http://example.test:9000/v1"
+        env["CEA_MI_MODEL"] = "portable-model-id"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "\n".join([
+                    "import json, sys, types",
+                    "fake_st = types.ModuleType('sentence_transformers')",
+                    "class FakeSentenceTransformer:",
+                    "    def __init__(self, model_name):",
+                    "        self.model_name = model_name",
+                    "    def encode(self, *args, **kwargs):",
+                    "        return []",
+                    "fake_st.SentenceTransformer = FakeSentenceTransformer",
+                    "fake_np = types.ModuleType('numpy')",
+                    "fake_np.array = lambda x: x",
+                    "fake_np.dot = lambda a, b: 0.0",
+                    "sys.modules['sentence_transformers'] = fake_st",
+                    "sys.modules['numpy'] = fake_np",
+                    "from memgpt_target.setup_memgpt import EmbeddingMemoryAgent",
+                    "agent = EmbeddingMemoryAgent()",
+                    "print(json.dumps({'base': agent.vllm_base, 'model': agent.vllm_model}))",
+                ]),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('"base": "http://example.test:9000/v1"', proc.stdout)
+        self.assertIn('"model": "portable-model-id"', proc.stdout)
+
     def test_run_memgpt_attack_uses_dataset_memory_file_and_log_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

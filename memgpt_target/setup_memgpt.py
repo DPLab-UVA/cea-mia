@@ -28,12 +28,19 @@ import sys
 import time
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from config import Config
+
 # ── Agent setup using Letta SDK ──────────────────────────────────────────
 
-def create_agent():
+def create_agent(api_base: str | None = None, model: str | None = None):
     """Create a Letta agent with archival (embedding-based) memory."""
     from letta import create_client
 
+    cfg = Config()
     client = create_client()
 
     # Create agent with archival memory enabled
@@ -52,8 +59,8 @@ def create_agent():
         },
         llm_config={
             "model_endpoint_type": "vllm",
-            "model_endpoint": "http://cheetah04:8000/v1",
-            "model": "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+            "model_endpoint": api_base or cfg.api_base,
+            "model": model or cfg.model,
         },
     )
     print(f"Created agent: {agent_state.id}")
@@ -121,18 +128,17 @@ class EmbeddingMemoryAgent:
     """
 
     def __init__(self, model_name="BAAI/bge-small-en-v1.5", db_path="memgpt_memories.json",
-                 vllm_base="http://cheetah04:8000/v1", vllm_model=None):
+                 vllm_base=None, vllm_model=None, vllm_api_key=None):
         from sentence_transformers import SentenceTransformer
         import numpy as np
 
+        cfg = Config()
         self.embedder = SentenceTransformer(model_name)
         self.db_path = Path(db_path)
         self.memories: list[dict] = []
-        self.vllm_base = vllm_base
-        self.vllm_model = vllm_model or (
-            "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/"
-            "snapshots/495f39366efef23836d0cfae4fbe635880d2be31"
-        )
+        self.vllm_base = vllm_base or cfg.api_base
+        self.vllm_model = vllm_model or cfg.model
+        self.vllm_api_key = vllm_api_key or cfg.api_key
         self._np = np
 
         if self.db_path.exists():
@@ -210,7 +216,7 @@ class EmbeddingMemoryAgent:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{self.vllm_base}/chat/completions",
-                headers={"Authorization": "Bearer token-vllm"},
+                headers={"Authorization": f"Bearer {self.vllm_api_key}"},
                 json=payload,
             )
             resp.raise_for_status()
