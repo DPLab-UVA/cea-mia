@@ -239,8 +239,16 @@ class EmbeddingMemoryAgent:
         return result
 
 
-def setup_standalone(dataset_path: str, num_conversations: int = None):
-    """Set up the standalone embedding-based agent and ingest facts."""
+def setup_standalone(dataset_path: str, num_conversations: int = None,
+                     member_ratio: float = 0.5, seed: int = 42):
+    """Set up the standalone embedding-based agent and ingest only a subset of facts.
+
+    Only `member_ratio` of facts are ingested (members); the rest are non-members.
+    This creates a realistic split for membership inference evaluation.
+    """
+    import random as _rng
+    _rng.seed(seed)
+
     agent = EmbeddingMemoryAgent()
 
     with open(dataset_path, encoding="utf-8") as f:
@@ -248,8 +256,9 @@ def setup_standalone(dataset_path: str, num_conversations: int = None):
 
     turns = data if isinstance(data, list) else data.get("turns", data.get("conversations", []))
 
-    ingested = 0
-    facts_added = set()
+    # Collect all unique facts first
+    all_facts = []
+    seen = set()
     for turn in turns:
         meta = turn.get("metadata", {})
         introduced = meta.get("facts_introduced", [])
@@ -257,20 +266,43 @@ def setup_standalone(dataset_path: str, num_conversations: int = None):
             introduced = [introduced]
         for fact_text in introduced:
             ft = fact_text.strip()
-            if not ft or ft in facts_added:
+            if not ft or ft in seen:
                 continue
-            if "=" in ft:
-                key, val = ft.split("=", 1)
-                content = f"The user's {key.strip().replace('_', ' ')} is {val.strip()}"
-            else:
-                content = ft
-            agent.add_memory(content, metadata={"source_fact": ft})
-            facts_added.add(ft)
-            ingested += 1
+            seen.add(ft)
+            all_facts.append(ft)
+
+    # Randomly select member_ratio of facts to ingest
+    _rng.shuffle(all_facts)
+    n_members = int(len(all_facts) * member_ratio)
+    member_facts = set(all_facts[:n_members])
+    nonmember_facts = set(all_facts[n_members:])
+
+    ingested = 0
+    for ft in member_facts:
+        if "=" in ft:
+            key, val = ft.split("=", 1)
+            content = f"The user's {key.strip().replace('_', ' ')} is {val.strip()}"
+        else:
+            content = ft
+        agent.add_memory(content, metadata={"source_fact": ft, "is_member": True})
+        ingested += 1
 
     agent.save()
-    print(f"Ingested {ingested} unique facts into embedding memory.")
+
+    # Save the member/nonmember split for the attack to use
+    split_path = agent.db_path.with_suffix(".split.json")
+    split_path.write_text(json.dumps({
+        "member_facts": list(member_facts),
+        "nonmember_facts": list(nonmember_facts),
+        "seed": seed,
+        "member_ratio": member_ratio,
+    }, indent=2))
+
+    print(f"Total unique facts: {len(all_facts)}")
+    print(f"Ingested {ingested} member facts ({member_ratio*100:.0f}%)")
+    print(f"Held out {len(nonmember_facts)} nonmember facts")
     print(f"Memory file: {agent.db_path}")
+    print(f"Split file: {split_path}")
 
 
 if __name__ == "__main__":

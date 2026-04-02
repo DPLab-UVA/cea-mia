@@ -1,20 +1,23 @@
-"""CEA-MI attack adapted for embedding-based memory agent (MemGPT/Letta comparison).
+"""CEA-MI attack adapted for Mem0-style embedding memory agent.
 
-This script reuses the CEA-MI framework but targets the EmbeddingMemoryAgent
-instead of nanobot. The key difference is that embedding-based retrieval
-creates a much clearer member/nonmember signal because:
-  - Cosine similarity for member facts >> similarity for decoy facts
-  - Semantic search naturally separates fact-specific from topic-generic queries
+Mem0 uses embedding-based retrieval via vector stores. The system prompt
+includes a "User Memories (from Mem0)" section that differs from MemGPT's
+"Recalled Memories" section, testing whether CEA-MI generalizes across
+different prompt injection styles for memory-augmented agents.
 
 Usage:
-    # First, set up the target agent:
-    python setup_memgpt.py standalone --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    # First set up the target:
+    python setup_mem0.py standalone --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
 
     # Then run the attack:
-    python memgpt_attack.py --access blackbox --num-facts 30 --seed 42
+    python mem0_attack.py --access blackbox --num-facts 30 --seed 42
 
-    # Multi-seed:
-    python memgpt_attack.py --access blackbox --num-facts 30 --multi-seed
+    # All access levels:
+    for access in blackbox graybox whitebox; do
+        python mem0_attack.py --access $access --num-facts 30 --seed 42 \
+            --memory-file mem0_memories.json \
+            2>&1 | tee /bigtemp/trv3px/attack_mem0_${access}.log
+    done
 """
 from __future__ import annotations
 import argparse
@@ -24,10 +27,8 @@ import logging
 import random
 import sys
 import time
-import uuid
 from pathlib import Path
 
-# Add parent directory to path for CEA-MI imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import Config
@@ -37,16 +38,12 @@ from probe_generator import ProbeGenerator
 from feature_extractor import FeatureExtractor
 from evidence_accumulator import EvidenceAccumulator
 from evaluation import Evaluator
-
-from setup_memgpt import EmbeddingMemoryAgent
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("memgpt_attack")
-
-# Reuse decoy pools from natural_attack
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from natural_attack import (DECOY_VALUES, DEFAULT_DECOYS, load_dataset_facts,
                             build_decoy_fact, build_fact_objects)
+from setup_mem0 import Mem0Agent
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("mem0_attack")
 
 
 def classify_facts_from_split(dataset_facts, split_path: str):
@@ -65,16 +62,15 @@ def classify_facts_from_split(dataset_facts, split_path: str):
         elif raw in nonmember_set:
             df["match_score"] = 0.0
             nonmembers.append(df)
-        # facts not in either set are skipped
 
     log.info("Classified from split: %d members, %d nonmembers", len(members), len(nonmembers))
     return members, nonmembers
 
 
-class MemGPTAttack:
-    """CEA-MI attack targeting the embedding-based memory agent."""
+class Mem0Attack:
+    """CEA-MI attack targeting Mem0-style embedding memory agent."""
 
-    def __init__(self, cfg: Config, agent: EmbeddingMemoryAgent, rng: random.Random):
+    def __init__(self, cfg: Config, agent: Mem0Agent, rng: random.Random):
         self.cfg = cfg
         self.agent = agent
         self.rng = rng
@@ -197,14 +193,13 @@ class MemGPTAttack:
 
 
 async def amain():
-    parser = argparse.ArgumentParser(description="CEA-MI MemGPT Attack")
+    parser = argparse.ArgumentParser(description="CEA-MI Mem0 Attack")
     parser.add_argument("--access", choices=["blackbox", "graybox", "whitebox"], default="blackbox")
     parser.add_argument("--num-facts", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dataset", default="/bigtemp/trv3px/benchmark_v2_dataset.json")
-    parser.add_argument("--memory-file", default="memgpt_memories.json")
-    parser.add_argument("--split-file", default=None,
-                        help="Path to .split.json from setup_memgpt.py (default: memory-file with .split.json suffix)")
+    parser.add_argument("--memory-file", default="mem0_memories.json")
+    parser.add_argument("--split-file", default=None)
     parser.add_argument("--multi-seed", action="store_true")
     parser.add_argument("--no-calibrate", action="store_true")
     args = parser.parse_args()
@@ -214,10 +209,8 @@ async def amain():
     do_calibrate = not args.no_calibrate
     seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
-    # Load agent with pre-ingested memories
-    agent = EmbeddingMemoryAgent(db_path=args.memory_file, vllm_base=cfg.api_base, vllm_model=cfg.model)
+    agent = Mem0Agent(db_path=args.memory_file, vllm_base=cfg.api_base, vllm_model=cfg.model)
 
-    # Load and classify using the split file (ground truth)
     dataset_facts = load_dataset_facts(dataset_path)
     split_file = args.split_file or str(Path(args.memory_file).with_suffix(".split.json"))
     members, nonmembers = classify_facts_from_split(dataset_facts, split_file)
@@ -233,23 +226,26 @@ async def amain():
         rng = random.Random(seed)
 
         log.info("=" * 60)
-        log.info("CEA-MI MemGPT Attack | Access: %s | Seed: %d", args.access, seed)
+        log.info("CEA-MI Mem0 Attack | Access: %s | Seed: %d", args.access, seed)
         log.info("=" * 60)
 
         facts = build_fact_objects(members, nonmembers, args.num_facts, rng)
 
         start = time.time()
-        attacker = MemGPTAttack(cfg, agent, rng)
+        attacker = Mem0Attack(cfg, agent, rng)
         try:
             predictions = await attacker.attack_all(facts, args.access, calibrate=do_calibrate)
-            output_dir = Path(cfg.output_dir) / ("memgpt_%s_seed%d" % (args.access, seed))
+            output_dir = Path(cfg.output_dir) / ("mem0_%s_seed%d" % (args.access, seed))
             report = await attacker.evaluate(predictions, args.access, seed, output_dir)
             elapsed = time.time() - start
 
-            log.info("RESULTS (MemGPT, seed=%d)", seed)
+            log.info("=" * 60)
+            log.info("RESULTS (Mem0, seed=%d)", seed)
+            log.info("=" * 60)
             roc = report.get("roc_auc", {})
             if isinstance(roc, dict):
-                log.info("ROC-AUC: %.4f", roc.get("value", 0))
+                log.info("ROC-AUC: %.4f (95%% CI: %.4f-%.4f)",
+                         roc.get("value", 0), roc.get("ci_lower", 0), roc.get("ci_upper", 0))
             log.info("Accuracy: %.4f", report.get("accuracy", 0))
             log.info("Runtime: %.1fs", elapsed)
 
@@ -261,12 +257,13 @@ async def amain():
     if len(all_reports) > 1:
         import numpy as np
         log.info("=" * 60)
-        log.info("AGGREGATED (MemGPT, %d seeds)", len(all_reports))
+        log.info("AGGREGATED (Mem0, %d seeds)", len(all_reports))
         for m in ["accuracy"]:
             vals = [r.get(m, 0) for r in all_reports]
             log.info("  %s: mean=%.4f std=%.4f", m, np.mean(vals), np.std(vals))
         for m in ["roc_auc"]:
-            vals = [r.get(m, {}).get("value", 0) if isinstance(r.get(m), dict) else 0 for r in all_reports]
+            vals = [r.get(m, {}).get("value", 0) if isinstance(r.get(m), dict) else 0
+                    for r in all_reports]
             log.info("  %s: mean=%.4f std=%.4f", m, np.mean(vals), np.std(vals))
 
 
