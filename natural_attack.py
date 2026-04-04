@@ -246,7 +246,7 @@ class NaturalAttack:
         self.evaluator = Evaluator(bootstrap_n=cfg.bootstrap_n, seed=cfg.seed)
 
     async def _calibration_pass(self, pairs, access_level, n_cal=5):
-        """Run probes on first n_cal member + nonmember facts to calibrate distributions."""
+        """Run probes on first n_cal member + nonmember facts to calibrate weights and distributions."""
         member_pairs = [p for p in pairs if p.fact.is_member][:n_cal]
         nonmem_pairs = [p for p in pairs if not p.fact.is_member][:n_cal]
         cal_pairs = member_pairs + nonmem_pairs
@@ -254,24 +254,40 @@ class NaturalAttack:
             log.warning("Not enough calibration samples, skipping calibration")
             return
 
-        member_scores, nonmember_scores = [], []
+        # Collect per-round features for each calibration sample
+        # sample_features[i] = list of feature dicts for sample i
+        sample_features = []
+        sample_labels = []
+        all_cal_features = []  # flat list of (features, is_member) for Fisher LDA
         for pair in cal_pairs:
             probe_pairs = await self.probe_gen.generate_probe_family(pair)
-            round_scores = []
+            round_feats = []
             for probe_f, probe_d in probe_pairs:
                 result_f = await self._execute_probe(probe_f, access_level)
                 result_d = await self._execute_probe(probe_d, access_level)
                 features = self.feat_ext.extract_round_features(
                     pair.fact, [result_f], [result_d], probe_f.probe_type)
-                round_scores.append(self.feat_ext.compute_round_score(features))
-            mean_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
-            if pair.fact.is_member:
+                round_feats.append(features)
+                all_cal_features.append((features, pair.fact.is_member))
+            sample_features.append(round_feats)
+            sample_labels.append(pair.fact.is_member)
+
+        # Step 1: Learn feature weights from calibration data (Fisher's LDA)
+        learned = self.feat_ext.learn_weights_from_calibration(all_cal_features)
+        log.info("Learned weights: %s", {k: f"{v:.3f}" for k, v in sorted(learned.items())})
+
+        # Step 2: Re-score calibration samples with learned weights for accumulator
+        member_scores, nonmember_scores = [], []
+        for feats, is_member in zip(sample_features, sample_labels):
+            scores = [self.feat_ext.compute_round_score(f) for f in feats]
+            mean_score = sum(scores) / len(scores) if scores else 0.0
+            if is_member:
                 member_scores.append(mean_score)
             else:
                 nonmember_scores.append(mean_score)
 
-        log.info("Calibration: member_scores=%s", [f"{s:.4f}" for s in member_scores])
-        log.info("Calibration: nonmem_scores=%s", [f"{s:.4f}" for s in nonmember_scores])
+        log.info("Calibration (learned weights): member=%s", [f"{s:.4f}" for s in member_scores])
+        log.info("Calibration (learned weights): nonmem=%s", [f"{s:.4f}" for s in nonmember_scores])
         self.accumulator.calibrate_from_data(member_scores, nonmember_scores)
         log.info("Calibrated distributions: member(%.4f, %.4f) nonmember(%.4f, %.4f)",
                  self.accumulator.dist.member_mean, self.accumulator.dist.member_std,
@@ -434,7 +450,7 @@ async def amain():
         rng = random.Random(seed)
 
         log.info("=" * 60)
-        log.info("CEA-MI Natural Memory Attack (v4 — confirmation probes + calibration)")
+        log.info("CEA-MI Natural Memory Attack (v5 — learned weights + early stop fix)")
         log.info("Access: %s | Facts/class: %d | Seed: %d | Calibrate: %s",
                  args.access, args.num_facts, seed, do_calibrate)
         log.info("DB: %s", db_path)
@@ -451,13 +467,13 @@ async def amain():
         attacker = NaturalAttack(cfg, rng)
         try:
             predictions = await attacker.attack_all(facts, args.access, calibrate=do_calibrate)
-            output_dir = cfg.output_dir / ("natural_%s_seed%d_v4" % (args.access, seed))
+            output_dir = cfg.output_dir / ("natural_%s_seed%d_v5" % (args.access, seed))
             report = await attacker.evaluate(predictions, args.access, seed, output_dir)
             elapsed = time.time() - start
 
             # Print results
             log.info("=" * 60)
-            log.info("RESULTS (v4, seed=%d)", seed)
+            log.info("RESULTS (v5, seed=%d)", seed)
             log.info("=" * 60)
             roc = report.get("roc_auc", {})
             if isinstance(roc, dict):
@@ -477,7 +493,7 @@ async def amain():
 
             # Save metadata
             meta = {
-                "version": "v4_confirmation_probes_calibration",
+                "version": "v5_learned_weights_fisher_lda",
                 "num_semantic_memories": len(memories),
                 "num_dataset_facts": len(dataset_facts),
                 "num_members_found": len(members),
@@ -487,13 +503,9 @@ async def amain():
                 "runtime_seconds": elapsed,
                 "calibration": do_calibrate,
                 "improvements": [
-                    "confirmation probes (value-specific: 'My partner is Jamie, right?')",
-                    "calibration pass (first 5 per class to tune distributions)",
-                    "multi-seed support (--multi-seed for seeds 42,123,456)",
-                    "delta_latency normalized (÷2000, clipped [-1,1])",
-                    "delta_logprob normalized (÷5, clipped [-1,1])",
-                    "early stopping disabled (threshold=1.0)",
-                    "ROC score = raw mean delta (not LLR posterior)",
+                    "v4: confirmation probes, calibration, multi-seed",
+                    "v5: Fisher LDA learned feature weights from calibration",
+                    "v5: early stopping float precision bug fixed",
                 ],
             }
             with open(output_dir / "meta.json", "w") as f:
@@ -508,7 +520,7 @@ async def amain():
     # Aggregate multi-seed results
     if len(all_reports) > 1:
         log.info("=" * 60)
-        log.info("AGGREGATED RESULTS (v4, %d seeds)", len(all_reports))
+        log.info("AGGREGATED RESULTS (v5, %d seeds)", len(all_reports))
         log.info("=" * 60)
         import numpy as _np
         for metric in ["accuracy", "brier_score", "ece"]:
@@ -518,7 +530,7 @@ async def amain():
             vals = [r.get(metric, {}).get("value", 0) if isinstance(r.get(metric), dict) else 0 for r in all_reports]
             log.info("  %s: mean=%.4f std=%.4f", metric, _np.mean(vals), _np.std(vals))
         agg = {"seeds": seeds, "access_level": args.access, "per_seed": all_reports}
-        agg_dir = cfg.output_dir / ("natural_%s_aggregate_v4" % args.access)
+        agg_dir = cfg.output_dir / ("natural_%s_aggregate_v5" % args.access)
         agg_dir.mkdir(parents=True, exist_ok=True)
         with open(agg_dir / "aggregate_report.json", "w") as f:
             json.dump(agg, f, indent=2, default=str)

@@ -120,23 +120,35 @@ class MemGPTAttack:
         if len(member_pairs) < 2 or len(nonmem_pairs) < 2:
             return
 
-        member_scores, nonmember_scores = [], []
+        sample_features = []
+        sample_labels = []
+        all_cal_features = []
         for pair in member_pairs + nonmem_pairs:
             probe_pairs = await self.probe_gen.generate_probe_family(pair)
-            round_scores = []
+            round_feats = []
             for probe_f, probe_d in probe_pairs:
                 result_f = await self._execute_probe(probe_f, access_level)
                 result_d = await self._execute_probe(probe_d, access_level)
                 features = self.feat_ext.extract_round_features(
                     pair.fact, [result_f], [result_d], probe_f.probe_type)
-                round_scores.append(self.feat_ext.compute_round_score(features))
-            mean_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
-            if pair.fact.is_member:
+                round_feats.append(features)
+                all_cal_features.append((features, pair.fact.is_member))
+            sample_features.append(round_feats)
+            sample_labels.append(pair.fact.is_member)
+
+        learned = self.feat_ext.learn_weights_from_calibration(all_cal_features)
+        log.info("Learned weights: %s", {k: f"{v:.3f}" for k, v in sorted(learned.items())})
+
+        member_scores, nonmember_scores = [], []
+        for feats, is_member in zip(sample_features, sample_labels):
+            scores = [self.feat_ext.compute_round_score(f) for f in feats]
+            mean_score = sum(scores) / len(scores) if scores else 0.0
+            if is_member:
                 member_scores.append(mean_score)
             else:
                 nonmember_scores.append(mean_score)
 
-        log.info("Calibration: member=%s nonmem=%s",
+        log.info("Calibration (learned): member=%s nonmem=%s",
                  [f"{s:.4f}" for s in member_scores],
                  [f"{s:.4f}" for s in nonmember_scores])
         self.accumulator.calibrate_from_data(member_scores, nonmember_scores)

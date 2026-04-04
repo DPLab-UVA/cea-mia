@@ -10,6 +10,9 @@ HEDGING_WORDS = {
 }
 
 class FeatureExtractor:
+    def __init__(self):
+        self.learned_weights = None  # set after calibration
+
     @staticmethod
     def text_similarity(response: str, expected: str) -> float:
         if not expected or not response:
@@ -148,14 +151,61 @@ class FeatureExtractor:
         f["delta_confidence"] = (sum(fc)/len(fc) if fc else 0.5) - (sum(dc)/len(dc) if dc else 0.5)
         return f
 
+    DEFAULT_WEIGHTS = {
+        "delta_similarity": 3.0, "delta_consistency": 2.0,
+        "delta_contradiction_stability": 2.0, "delta_confirmation": 3.5,
+        "delta_recall_rate": 2.5, "delta_recall_similarity": 1.5,
+        "delta_logprob": 1.5, "delta_confidence": 1.0,
+        "delta_hedging": 0.8, "delta_latency": 0.3,
+    }
+
+    def learn_weights_from_calibration(self, calibration_data: list[tuple[dict, bool]]):
+        """Learn feature weights using Fisher's Linear Discriminant.
+
+        Args:
+            calibration_data: list of (feature_dict, is_member) tuples
+                collected during calibration probing.
+        Returns:
+            dict of learned weights (also stored on self.learned_weights)
+        """
+        from collections import defaultdict
+
+        member_feats = defaultdict(list)
+        nonmember_feats = defaultdict(list)
+
+        for features, is_member in calibration_data:
+            target = member_feats if is_member else nonmember_feats
+            for k, v in features.items():
+                if k.startswith("delta_"):
+                    target[k].append(v)
+
+        all_keys = set(list(member_feats.keys()) + list(nonmember_feats.keys()))
+        weights = {}
+
+        for key in all_keys:
+            m_vals = member_feats.get(key, [0.0])
+            nm_vals = nonmember_feats.get(key, [0.0])
+
+            m_mean = sum(m_vals) / len(m_vals)
+            nm_mean = sum(nm_vals) / len(nm_vals)
+
+            m_var = sum((v - m_mean) ** 2 for v in m_vals) / max(len(m_vals) - 1, 1)
+            nm_var = sum((v - nm_mean) ** 2 for v in nm_vals) / max(len(nm_vals) - 1, 1)
+
+            pooled_std = ((m_var + nm_var) / 2) ** 0.5 + 1e-6
+            fisher = abs(m_mean - nm_mean) / pooled_std
+
+            # Anti-correlated features (nonmembers score higher) are unreliable
+            if m_mean < nm_mean:
+                fisher *= 0.1
+
+            weights[key] = max(fisher, 0.1)
+
+        self.learned_weights = weights
+        return weights
+
     def compute_round_score(self, features: dict) -> float:
-        weights = {
-            "delta_similarity": 3.0, "delta_consistency": 2.0,
-            "delta_contradiction_stability": 2.0, "delta_confirmation": 3.5,
-            "delta_recall_rate": 2.5, "delta_recall_similarity": 1.5,
-            "delta_logprob": 1.5, "delta_confidence": 1.0,
-            "delta_hedging": 0.8, "delta_latency": 0.3,
-        }
+        weights = self.learned_weights if self.learned_weights else self.DEFAULT_WEIGHTS
         s, tw = 0.0, 0.0
         for k, w in weights.items():
             if k in features:

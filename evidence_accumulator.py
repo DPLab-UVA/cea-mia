@@ -94,8 +94,10 @@ class EvidenceAccumulator:
             log_posterior_odds = max(-50, min(50, log_posterior_odds))
             posterior = 1.0 / (1.0 + math.exp(-log_posterior_odds))
             
-            # Early stopping check
-            if posterior >= self.early_stop_threshold or posterior <= (1 - self.early_stop_threshold):
+            # Early stopping check (skip when threshold=1.0 to avoid float precision issue)
+            if self.early_stop_threshold < 1.0 and (
+                posterior >= self.early_stop_threshold or posterior <= (1 - self.early_stop_threshold)
+            ):
                 early_stopped = True
                 break
 
