@@ -22,6 +22,52 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## vLLM Backend
+
+This project uses vLLM to serve a local LLM as the chat-completions backend.
+
+### Start vLLM Server (Single GPU)
+
+```bash
+# Using Qwen2.5-7B-Instruct (recommended for single GPU)
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --tensor-parallel-size 1 \
+    --host 0.0.0.0 \
+    --port 8000
+```
+
+### Configure Environment
+
+Create a `.env` file or export these variables:
+
+```bash
+export HF_HOME=/path/to/hf_cache              # HuggingFace cache directory
+export CEA_MI_API_BASE=http://localhost:8000/v1
+export CEA_MI_MODEL=Qwen/Qwen2.5-7B-Instruct
+```
+
+Then source it before running:
+
+```bash
+source .env
+```
+
+### Multi-GPU Setup (Optional)
+
+For larger models (e.g., 72B), use tensor parallelism across multiple GPUs:
+
+```bash
+# Example: 3x A6000 GPUs for a 72B model
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-72B-Instruct \
+    --tensor-parallel-size 3 \
+    --host 0.0.0.0 \
+    --port 8000
+```
+
+Note: The number of attention heads must be divisible by `tensor-parallel-size`.
+
 ## Portable defaults
 
 By default, generated artifacts now stay inside the repository instead of writing

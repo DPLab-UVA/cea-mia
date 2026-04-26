@@ -2,3 +2,12 @@ __pycache__/
 results/
 *.pyc
 data/
+nanobot/
+logs/
+rawdata/
+tests/
+
+.codex
+.claude/
+.vscode/
+.env
