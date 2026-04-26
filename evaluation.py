@@ -8,6 +8,10 @@ from sklearn.metrics import roc_auc_score, roc_curve, average_precision_score, b
 from sklearn.calibration import calibration_curve
 from models import MembershipPrediction, ExperimentResult, AccessLevel
 
+
+TPR_FPR_TARGETS = (0.1, 0.01, 1e-3, 1e-4)
+
+
 class Evaluator:
     def __init__(self, bootstrap_n: int = 1000, seed: int = 42):
         self.bootstrap_n = bootstrap_n
@@ -55,7 +59,7 @@ class Evaluator:
         result.roc_auc = float(roc_auc_score(y_true, y_score))
         result.pr_auc = float(average_precision_score(y_true, y_score))
         fpr_arr, tpr_arr, _ = roc_curve(y_true, y_score)
-        for ft in [1e-3, 1e-4]:
+        for ft in TPR_FPR_TARGETS:
             result.tpr_at_fpr[f"fpr={ft}"] = self._tpr_at_fpr(fpr_arr, tpr_arr, ft)
         # Brier and ECE need probabilities in [0,1]
         result.brier_score = float(brier_score_loss(y_true, y_prob))
@@ -96,7 +100,7 @@ class Evaluator:
         report["roc_auc"] = {"value": auc_p, "ci_lower": auc_lo, "ci_upper": auc_hi}
         pr_p, pr_lo, pr_hi = self.bootstrap_ci(predictions, lambda yt, ys: average_precision_score(yt, ys))
         report["pr_auc"] = {"value": pr_p, "ci_lower": pr_lo, "ci_upper": pr_hi}
-        for ft in [1e-3, 1e-4]:
+        for ft in TPR_FPR_TARGETS:
             def tpr_fn(yt, ys, _ft=ft):
                 f, t, _ = roc_curve(yt, ys); return self._tpr_at_fpr(f, t, _ft)
             tp, tl, th = self.bootstrap_ci(predictions, tpr_fn)

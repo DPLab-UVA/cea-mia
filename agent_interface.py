@@ -12,6 +12,8 @@ from typing import Any, Optional
 
 import httpx
 
+from http_utils import post_with_retry
+
 import sys
 
 from config import (
@@ -146,6 +148,39 @@ class AgentInterface:
         results.sort(key=lambda x: (x["relevance"], x["strength"]), reverse=True)
         return results
 
+    @staticmethod
+    def _recalled_memory_payload(recalled: RecallResult) -> list[dict]:
+        """Serialize the memories that were actually recalled for a query."""
+        payload = []
+        for s in recalled.semantic:
+            payload.append({
+                "type": "semantic",
+                "memory_id": s.id,
+                "content": s.content,
+                "tags": s.tags,
+                "confidence": s.confidence,
+                "strength": s.strength(),
+            })
+        for e in recalled.episodic:
+            payload.append({
+                "type": "episodic",
+                "memory_id": e.id,
+                "content": f"{e.query} -> {e.summary}",
+                "tags": e.tags,
+                "confidence": e.confidence,
+                "strength": e.strength(),
+            })
+        for p in recalled.procedural:
+            payload.append({
+                "type": "procedural",
+                "memory_id": p.id,
+                "content": f"{p.trigger} -> {p.action}",
+                "tags": p.tags,
+                "confidence": p.confidence,
+                "strength": p.strength(),
+            })
+        return payload
+
     # \u2500\u2500 Build system prompt (replicating nanobot behavior) \u2500\u2500
 
     def _build_system_prompt(self, memory_section: str = "") -> str:
@@ -191,7 +226,8 @@ You are nanobot, a helpful AI assistant running locally.
         messages.append({"role": "user", "content": message})
 
         start = time.monotonic()
-        resp = await self.client.post(
+        resp = await post_with_retry(
+            self.client,
             f"{self.api_base}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={
@@ -202,7 +238,6 @@ You are nanobot, a helpful AI assistant running locally.
             },
         )
         latency = (time.monotonic() - start) * 1000
-        resp.raise_for_status()
         data = resp.json()
         self.query_count += 1
 
@@ -223,7 +258,8 @@ You are nanobot, a helpful AI assistant running locally.
         messages.append({"role": "user", "content": message})
 
         start = time.monotonic()
-        resp = await self.client.post(
+        resp = await post_with_retry(
+            self.client,
             f"{self.api_base}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={
@@ -236,7 +272,6 @@ You are nanobot, a helpful AI assistant running locally.
             },
         )
         latency = (time.monotonic() - start) * 1000
-        resp.raise_for_status()
         data = resp.json()
         self.query_count += 1
 
@@ -267,7 +302,8 @@ You are nanobot, a helpful AI assistant running locally.
         messages.append({"role": "user", "content": message})
 
         start = time.monotonic()
-        resp = await self.client.post(
+        resp = await post_with_retry(
+            self.client,
             f"{self.api_base}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json={
@@ -280,7 +316,6 @@ You are nanobot, a helpful AI assistant running locally.
             },
         )
         latency = (time.monotonic() - start) * 1000
-        resp.raise_for_status()
         data = resp.json()
         self.query_count += 1
 
@@ -300,6 +335,7 @@ You are nanobot, a helpful AI assistant running locally.
             "recall_triggered": not recalled.is_empty(),
             "recall_hit_count": len(recalled.semantic) + len(recalled.episodic),
             "recall_top_similarity": top_scores[0]["relevance"] if top_scores else 0.0,
+            "recalled_memories": self._recalled_memory_payload(recalled),
             "recall_scores": top_scores,
             "memory_stats": self.store.stats(),
         }
