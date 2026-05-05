@@ -11,6 +11,7 @@ results_analysis/
 data/all_perltqa_seed42.json
 data/dataset_seed42.json
 data/test_perltqa_dialogue_seed42.json
+main.py
 
 .codex
 .claude/
