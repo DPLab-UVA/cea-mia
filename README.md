@@ -121,16 +121,6 @@ Run selected baselines through the wrapper:
 
 Baseline access policy is handled internally: loss, Min-K%, and reference run with graybox information; the other baselines run whitebox once and write derived access-level outputs.
 
-## Legacy And Synthetic Entry Points
-
-`main.py` runs the older synthetic fact and decoy-pair experiment against nanobot:
-
-```bash
-python3 main.py --access blackbox --members 10 --nonmembers 10
-```
-
-`mem0_target/` and `memgpt_target/` contain standalone comparison scripts from earlier iterations. They are useful for isolated embedding-memory experiments, but the current recommended path is `natural_attack.py --target mem0` or `natural_attack.py --target memgpt`.
-
 ## Troubleshooting
 
 If an attack exits with missing LLM configuration, set both `CEA_MI_API_BASE` and `CEA_MI_MODEL`. If nanobot is not importable, install it in the active environment or set `CEA_MI_NANOBOT_PROJECT` to a checkout containing the package. If you want to keep large generated files out of git, use the ignored `results/` and `logs/` directories.
