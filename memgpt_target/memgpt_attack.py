@@ -8,13 +8,13 @@ creates a much clearer member/nonmember signal because:
 
 Usage:
     # First, set up the target agent:
-    python setup_memgpt.py standalone --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_memgpt.py standalone --dataset data/perltqa_seed42.json
 
     # Then run the attack:
-    python memgpt_attack.py --access blackbox --num-facts 30 --seed 42
+    python memgpt_attack.py --dataset data/perltqa_seed42.json --access blackbox --num-facts 30 --seed 42
 
     # Multi-seed:
-    python memgpt_attack.py --access blackbox --num-facts 30 --multi-seed
+    python memgpt_attack.py --dataset data/perltqa_seed42.json --access blackbox --num-facts 30 --multi-seed
 """
 from __future__ import annotations
 import argparse
@@ -174,7 +174,7 @@ async def amain():
     parser.add_argument("--access", choices=["blackbox", "graybox", "whitebox"], default="blackbox")
     parser.add_argument("--num-facts", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dataset", default="/bigtemp/trv3px/benchmark_v2_dataset.json")
+    parser.add_argument("--dataset", required=True)
     parser.add_argument("--memory-file", default="memgpt_memories.json")
     parser.add_argument("--split-file", default=None,
                         help="Path to .split.json from setup_memgpt.py (default: memory-file with .split.json suffix)")
@@ -182,11 +182,20 @@ async def amain():
     args = parser.parse_args()
 
     cfg = Config()
+    try:
+        cfg.require_llm_config()
+    except ValueError as exc:
+        parser.error(str(exc))
     dataset_path = Path(args.dataset)
     seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
     # Load agent with pre-ingested memories
-    agent = EmbeddingMemoryAgent(db_path=args.memory_file, vllm_base=cfg.api_base, vllm_model=cfg.model)
+    agent = EmbeddingMemoryAgent(
+        db_path=args.memory_file,
+        vllm_base=cfg.api_base,
+        vllm_model=cfg.model,
+        vllm_api_key=cfg.api_key,
+    )
 
     # Load and classify using the split file (ground truth)
     dataset_facts = load_dataset_facts(dataset_path)

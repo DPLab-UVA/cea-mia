@@ -52,13 +52,18 @@ class AgentInterface:
 
     def __init__(
         self,
-        api_base: str = DEFAULT_API_BASE,
+        api_base: Optional[str] = DEFAULT_API_BASE,
         api_key: str = DEFAULT_API_KEY,
-        model: str = DEFAULT_MODEL,
+        model: Optional[str] = DEFAULT_MODEL,
         db_path: Optional[Path] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ):
+        if not api_base or not model:
+            raise ValueError(
+                "AgentInterface requires an LLM backend. Set CEA_MI_API_BASE "
+                "and CEA_MI_MODEL, or pass api_base and model explicitly."
+            )
         self.api_base = api_base
         self.api_key = api_key
         self.model = model

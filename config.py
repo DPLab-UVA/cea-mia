@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -12,12 +13,9 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
-DEFAULT_API_BASE = os.environ.get("CEA_MI_API_BASE", "http://cheetah04:8000/v1")
+DEFAULT_API_BASE = os.environ.get("CEA_MI_API_BASE")
 DEFAULT_API_KEY = os.environ.get("CEA_MI_API_KEY", "token-vllm")
-DEFAULT_MODEL = os.environ.get(
-    "CEA_MI_MODEL",
-    "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-7B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
-)
+DEFAULT_MODEL = os.environ.get("CEA_MI_MODEL")
 DEFAULT_NANOBOT_DB_PATH = _env_path(
     "CEA_MI_NANOBOT_DB_PATH",
     Path.home() / ".nanobot" / "memory" / "pmc.db",
@@ -35,9 +33,9 @@ DEFAULT_DATA_DIR = _env_path("CEA_MI_DATA_DIR", REPO_ROOT / "data")
 @dataclass
 class Config:
     # vLLM / nanobot backend
-    api_base: str = field(default_factory=lambda: DEFAULT_API_BASE)
+    api_base: Optional[str] = field(default_factory=lambda: DEFAULT_API_BASE)
     api_key: str = field(default_factory=lambda: DEFAULT_API_KEY)
-    model: str = field(default_factory=lambda: DEFAULT_MODEL)
+    model: Optional[str] = field(default_factory=lambda: DEFAULT_MODEL)
 
     # nanobot memory DB (white-box access)
     nanobot_db_path: Path = field(default_factory=lambda: DEFAULT_NANOBOT_DB_PATH)
@@ -60,3 +58,18 @@ class Config:
     # Paths
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     data_dir: Path = field(default_factory=lambda: DEFAULT_DATA_DIR)
+
+    def require_llm_config(self) -> None:
+        """Fail fast when an attack path needs an OpenAI-compatible backend."""
+        missing = []
+        if not self.api_base:
+            missing.append("CEA_MI_API_BASE")
+        if not self.model:
+            missing.append("CEA_MI_MODEL")
+        if missing:
+            raise ValueError(
+                "Missing required LLM configuration: "
+                + ", ".join(missing)
+                + ". Set these environment variables or pass them through the "
+                "runner script arguments before launching an attack."
+            )

@@ -26,6 +26,7 @@ logger = logging.getLogger("cea_mi")
 class CEAMIExperiment:
     def __init__(self, config=None):
         self.cfg = config or Config()
+        self.cfg.require_llm_config()
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.data_dir.mkdir(parents=True, exist_ok=True)
         self.agent = AgentInterface(

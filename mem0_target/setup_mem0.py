@@ -13,10 +13,10 @@ Usage:
     pip install mem0ai sentence-transformers
 
     # Option A: Full Mem0 with vLLM (requires vLLM running + tool calling support)
-    python setup_mem0.py full --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_mem0.py full --dataset data/perltqa_seed42.json
 
     # Option B: Lightweight direct embedding store (recommended, no vLLM needed for setup)
-    python setup_mem0.py standalone --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_mem0.py standalone --dataset data/perltqa_seed42.json
 
     # Then run attack
     python mem0_attack.py --access blackbox --num-facts 30 --seed 42
@@ -25,26 +25,53 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import time
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL, DEFAULT_OUTPUT_DIR
+
+
+def _require_llm_config(vllm_base: str | None, vllm_model: str | None, context: str) -> None:
+    missing = []
+    if not vllm_base:
+        missing.append("--vllm-base or CEA_MI_API_BASE")
+    if not vllm_model:
+        missing.append("--vllm-model or CEA_MI_MODEL")
+    if missing:
+        raise ValueError(f"{context} requires {', '.join(missing)}")
 
 
 # ── Full Mem0 setup (LLM-based fact extraction) ─────────────────────────
 
-def setup_full_mem0(dataset_path: str, member_ratio: float = 0.5, seed: int = 42):
+def setup_full_mem0(
+    dataset_path: str,
+    member_ratio: float = 0.5,
+    seed: int = 42,
+    vllm_base: str | None = None,
+    vllm_model: str | None = None,
+    api_key: str = DEFAULT_API_KEY,
+    vector_path: str | Path | None = None,
+):
     """Set up Mem0 with vLLM backend and ingest facts through LLM extraction."""
     from mem0 import Memory
+
+    vllm_base = vllm_base or DEFAULT_API_BASE
+    vllm_model = vllm_model or DEFAULT_MODEL
+    _require_llm_config(vllm_base, vllm_model, "Full Mem0 setup")
+    vector_path = Path(vector_path).expanduser() if vector_path else DEFAULT_OUTPUT_DIR / "mem0_qdrant"
 
     config = {
         "llm": {
             "provider": "vllm",
             "config": {
-                "model": (
-                    "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/"
-                    "snapshots/495f39366efef23836d0cfae4fbe635880d2be31"
-                ),
-                "vllm_base_url": "http://cheetah04:8000/v1",
-                "api_key": "token-vllm",
+                "model": vllm_model,
+                "vllm_base_url": vllm_base,
+                "api_key": api_key,
                 "temperature": 0.1,
                 "max_tokens": 2000,
             },
@@ -61,7 +88,7 @@ def setup_full_mem0(dataset_path: str, member_ratio: float = 0.5, seed: int = 42
             "config": {
                 "collection_name": "cea_mi_mem0",
                 "embedding_model_dims": 384,
-                "path": "/bigtemp/trv3px/cea_mi/mem0_target/qdrant_data",
+                "path": str(vector_path),
             },
         },
         "version": "v1.1",
@@ -113,18 +140,18 @@ class Mem0Agent:
 
     def __init__(self, model_name="BAAI/bge-small-en-v1.5",
                  db_path="mem0_memories.json",
-                 vllm_base="http://cheetah04:8000/v1", vllm_model=None):
+                 vllm_base: str | None = None,
+                 vllm_model: str | None = None,
+                 vllm_api_key: str = DEFAULT_API_KEY):
         from sentence_transformers import SentenceTransformer
         import numpy as np
 
         self.embedder = SentenceTransformer(model_name)
         self.db_path = Path(db_path)
         self.memories: list[dict] = []
-        self.vllm_base = vllm_base
-        self.vllm_model = vllm_model or (
-            "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/"
-            "snapshots/495f39366efef23836d0cfae4fbe635880d2be31"
-        )
+        self.vllm_base = vllm_base or DEFAULT_API_BASE
+        self.vllm_model = vllm_model or DEFAULT_MODEL
+        self.vllm_api_key = vllm_api_key or DEFAULT_API_KEY
         self._np = np
 
         if self.db_path.exists():
@@ -165,6 +192,7 @@ class Mem0Agent:
         """Query the agent — compatible with CEA-MI's AgentInterface.query()."""
         import httpx
 
+        _require_llm_config(self.vllm_base, self.vllm_model, "Mem0Agent.query")
         recalled = self.recall(message)
 
         # Build Mem0-style system prompt with recalled memories
@@ -204,7 +232,7 @@ class Mem0Agent:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{self.vllm_base}/chat/completions",
-                headers={"Authorization": "Bearer token-vllm"},
+                headers={"Authorization": f"Bearer {self.vllm_api_key}"},
                 json=payload,
             )
             resp.raise_for_status()
@@ -263,10 +291,15 @@ def _save_split(member_facts, nonmember_facts, seed, member_ratio, path):
     print(f"Split file: {path}")
 
 
-def setup_standalone(dataset_path: str, member_ratio: float = 0.5, seed: int = 42):
+def setup_standalone(
+    dataset_path: str,
+    member_ratio: float = 0.5,
+    seed: int = 42,
+    memory_file: str | Path = "mem0_memories.json",
+):
     """Set up lightweight Mem0-style agent with 50/50 member/nonmember split."""
     rng = random.Random(seed)
-    agent = Mem0Agent()
+    agent = Mem0Agent(db_path=memory_file)
 
     all_facts = _extract_all_facts(dataset_path)
     rng.shuffle(all_facts)
@@ -302,16 +335,32 @@ if __name__ == "__main__":
     p_full.add_argument("--dataset", required=True)
     p_full.add_argument("--member-ratio", type=float, default=0.5)
     p_full.add_argument("--seed", type=int, default=42)
+    p_full.add_argument("--vllm-base", default=None, help="OpenAI-compatible API base URL")
+    p_full.add_argument("--vllm-model", default=None, help="Model name/path served by the API")
+    p_full.add_argument("--api-key", default=DEFAULT_API_KEY)
+    p_full.add_argument("--vector-path", default=None, help="Local qdrant storage path")
 
     p_standalone = sub.add_parser("standalone", help="Lightweight embedding store")
     p_standalone.add_argument("--dataset", required=True)
     p_standalone.add_argument("--member-ratio", type=float, default=0.5)
     p_standalone.add_argument("--seed", type=int, default=42)
+    p_standalone.add_argument("--memory-file", default="mem0_memories.json")
 
     args = parser.parse_args()
     if args.cmd == "full":
-        setup_full_mem0(args.dataset, args.member_ratio, args.seed)
+        try:
+            setup_full_mem0(
+                args.dataset,
+                args.member_ratio,
+                args.seed,
+                vllm_base=args.vllm_base,
+                vllm_model=args.vllm_model,
+                api_key=args.api_key,
+                vector_path=args.vector_path,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     elif args.cmd == "standalone":
-        setup_standalone(args.dataset, args.member_ratio, args.seed)
+        setup_standalone(args.dataset, args.member_ratio, args.seed, args.memory_file)
     else:
         parser.print_help()

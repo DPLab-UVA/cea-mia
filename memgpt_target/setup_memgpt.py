@@ -15,7 +15,7 @@ Usage:
     python setup_memgpt.py serve
 
     # 3. Ingest benchmark facts
-    python setup_memgpt.py ingest --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_memgpt.py ingest --dataset data/perltqa_seed42.json
 
     # 4. Run CEA-MI attack
     python memgpt_attack.py --access blackbox --num-facts 30 --seed 42
@@ -28,11 +28,31 @@ import sys
 import time
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
+
+
+def _require_llm_config(vllm_base: str | None, vllm_model: str | None, context: str) -> None:
+    missing = []
+    if not vllm_base:
+        missing.append("--vllm-base or CEA_MI_API_BASE")
+    if not vllm_model:
+        missing.append("--vllm-model or CEA_MI_MODEL")
+    if missing:
+        raise ValueError(f"{context} requires {', '.join(missing)}")
+
 # ── Agent setup using Letta SDK ──────────────────────────────────────────
 
-def create_agent():
+def create_agent(vllm_base: str | None = None, vllm_model: str | None = None):
     """Create a Letta agent with archival (embedding-based) memory."""
     from letta import create_client
+
+    vllm_base = vllm_base or DEFAULT_API_BASE
+    vllm_model = vllm_model or DEFAULT_MODEL
+    _require_llm_config(vllm_base, vllm_model, "Letta agent setup")
 
     client = create_client()
 
@@ -52,8 +72,8 @@ def create_agent():
         },
         llm_config={
             "model_endpoint_type": "vllm",
-            "model_endpoint": "http://cheetah04:8000/v1",
-            "model": "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+            "model_endpoint": vllm_base,
+            "model": vllm_model,
         },
     )
     print(f"Created agent: {agent_state.id}")
@@ -121,18 +141,18 @@ class EmbeddingMemoryAgent:
     """
 
     def __init__(self, model_name="BAAI/bge-small-en-v1.5", db_path="memgpt_memories.json",
-                 vllm_base="http://cheetah04:8000/v1", vllm_model=None):
+                 vllm_base: str | None = None,
+                 vllm_model: str | None = None,
+                 vllm_api_key: str = DEFAULT_API_KEY):
         from sentence_transformers import SentenceTransformer
         import numpy as np
 
         self.embedder = SentenceTransformer(model_name)
         self.db_path = Path(db_path)
         self.memories: list[dict] = []
-        self.vllm_base = vllm_base
-        self.vllm_model = vllm_model or (
-            "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/"
-            "snapshots/495f39366efef23836d0cfae4fbe635880d2be31"
-        )
+        self.vllm_base = vllm_base or DEFAULT_API_BASE
+        self.vllm_model = vllm_model or DEFAULT_MODEL
+        self.vllm_api_key = vllm_api_key or DEFAULT_API_KEY
         self._np = np
 
         if self.db_path.exists():
@@ -176,6 +196,7 @@ class EmbeddingMemoryAgent:
         """Query the agent — mirrors AgentInterface.query() signature."""
         import httpx
 
+        _require_llm_config(self.vllm_base, self.vllm_model, "EmbeddingMemoryAgent.query")
         # Retrieve relevant memories
         recalled = self.recall(message)
 
@@ -210,7 +231,7 @@ class EmbeddingMemoryAgent:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{self.vllm_base}/chat/completions",
-                headers={"Authorization": "Bearer token-vllm"},
+                headers={"Authorization": f"Bearer {self.vllm_api_key}"},
                 json=payload,
             )
             resp.raise_for_status()
@@ -240,7 +261,8 @@ class EmbeddingMemoryAgent:
 
 
 def setup_standalone(dataset_path: str, num_conversations: int = None,
-                     member_ratio: float = 0.5, seed: int = 42):
+                     member_ratio: float = 0.5, seed: int = 42,
+                     memory_file: str | Path = "memgpt_memories.json"):
     """Set up the standalone embedding-based agent and ingest only a subset of facts.
 
     Only `member_ratio` of facts are ingested (members); the rest are non-members.
@@ -249,7 +271,7 @@ def setup_standalone(dataset_path: str, num_conversations: int = None,
     import random as _rng
     _rng.seed(seed)
 
-    agent = EmbeddingMemoryAgent()
+    agent = EmbeddingMemoryAgent(db_path=memory_file)
 
     with open(dataset_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -310,6 +332,8 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="cmd")
 
     p_setup = sub.add_parser("setup", help="Create Letta agent")
+    p_setup.add_argument("--vllm-base", default=None, help="OpenAI-compatible API base URL")
+    p_setup.add_argument("--vllm-model", default=None, help="Model name/path served by the API")
     p_ingest = sub.add_parser("ingest", help="Ingest facts via Letta")
     p_ingest.add_argument("--dataset", required=True)
     p_ingest.add_argument("--num-facts", type=int, default=None)
@@ -319,16 +343,20 @@ if __name__ == "__main__":
     p_standalone = sub.add_parser("standalone", help="Standalone embedding agent (no Letta)")
     p_standalone.add_argument("--dataset", required=True)
     p_standalone.add_argument("--num-conversations", type=int, default=None)
+    p_standalone.add_argument("--memory-file", default="memgpt_memories.json")
 
     args = parser.parse_args()
 
     if args.cmd == "setup":
-        create_agent()
+        try:
+            create_agent(vllm_base=args.vllm_base, vllm_model=args.vllm_model)
+        except ValueError as exc:
+            parser.error(str(exc))
     elif args.cmd == "ingest":
         ingest_facts(args.dataset, args.num_facts)
     elif args.cmd == "serve":
         serve()
     elif args.cmd == "standalone":
-        setup_standalone(args.dataset, args.num_conversations)
+        setup_standalone(args.dataset, args.num_conversations, memory_file=args.memory_file)
     else:
         parser.print_help()

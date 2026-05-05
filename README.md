@@ -1,18 +1,12 @@
-# CEA-MIA
+# Multi-Recall Memory MIA (MRMMIA)
 
-Contrastive Evidence Accumulating Membership Inference Attack
+Multi-Recall Memory MIA (MRMMIA) is a membership inference attack for memory-augmented agents. Given a candidate memory unit, MRMMIA generates multiple direct recall probes, queries the target agent, and aggregates response evidence, gray-box logprob evidence when available, and white-box memory-retrieval evidence when available.
 
-## Status
+This repository contains the current MRMMIA MemoryDataset attack pipeline, baseline comparisons, and older synthetic or target-specific experiments. The main maintained entry points are:
 
-This repository contains the research code for CEA-MIA against a memory-augmented
-`nanobot` agent. The attack code assumes access to:
-
-- a running chat-completions backend
-- a local `nanobot` checkout
-- a populated nanobot memory database
-
-Those external dependencies are not vendored in this repository, so you will need
-to point the code at your own environment.
+- `natural_attack.py`: main MRMMIA implementation. It injects each user's member memories, probes member and non-member units with multiple recall probes, runs whitebox once, and writes derived blackbox, graybox, and whitebox outputs.
+- `baselines/baseline_attacks.py`: comparison baselines such as naive single-query, loss, Min-K%, reference model, multi-contrastive, direct multi-probe, recall-no-reason, and multi-judge.
+- `run_all_natural_attacks.sh` and `run_baseline_attacks.sh`: convenience wrappers for common multi-dataset and multi-baseline runs.
 
 ## Setup
 
@@ -22,108 +16,121 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## vLLM Backend
-
-This project uses vLLM to serve a local LLM as the chat-completions backend.
-
-### Start vLLM Server (Single GPU)
+The attack code calls an OpenAI-compatible chat completions endpoint. You can serve one with vLLM, or point the code at an existing compatible backend.
 
 ```bash
-# Using Qwen2.5-7B-Instruct (recommended for single GPU)
 python -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen2.5-7B-Instruct \
-    --tensor-parallel-size 1 \
-    --host 0.0.0.0 \
-    --port 8000
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --tensor-parallel-size 1 \
+  --host 0.0.0.0 \
+  --port 8000
 ```
 
-### Configure Environment
+## Required Configuration
 
-Create a `.env` file or export these variables:
+The repository intentionally does not embed a lab host, server name, or local model checkpoint path. Set the LLM endpoint and model explicitly before running attacks:
 
 ```bash
-export HF_HOME=/path/to/hf_cache              # HuggingFace cache directory
-export CEA_MI_API_BASE=http://localhost:8000/v1
+export CEA_MI_API_BASE=http://127.0.0.1:8000/v1
 export CEA_MI_MODEL=Qwen/Qwen2.5-7B-Instruct
+export CEA_MI_API_KEY=token-vllm
 ```
 
-Then source it before running:
+Useful optional environment variables:
+
+- `CEA_MI_DATA_DIR`: dataset directory, default `./data`
+- `CEA_MI_OUTPUT_DIR`: Python entry-point output directory, default `./results`
+- `CEA_MI_RESULTS_DIR`: shell wrapper output directory, default `results`
+- `CEA_MI_LOG_DIR`: shell wrapper log directory, default `logs`
+- `CEA_MI_NANOBOT_PROJECT`: path to a checkout containing the `nanobot` package
+- `CEA_MI_NANOBOT_DB_PATH`: nanobot SQLite memory database path
+- `CEA_MI_SEED`, `CEA_MI_NUM_FACTS`, `CEA_MI_CONCURRENCY`, `CEA_MI_DIRECT_PROBE_K`
+
+## Datasets
+
+Prebuilt MemoryDataset files are included under `data/`:
+
+- `data/perltqa_seed42.json`
+- `data/locomo_seed42.json`
+- `data/msc_seed42.json`
+
+CLI dataset arguments accept either an alias such as `perltqa`, `locomo`, or `msc`, or an explicit JSON path. A MemoryDataset stores per-user member and non-member memory units. During an attack, only the selected user's member units are injected into the target memory. We also provide the code of preprocessing in `memory_extractor.py`.
+
+
+## Targets
+
+`natural_attack.py` and the baseline runner support three target adapters:
+
+- `mem0`: lightweight Mem0-style embedding memory backed by local JSON plus sentence-transformers.
+- `memgpt`: lightweight MemGPT/Letta-style embedding memory backed by local JSON plus sentence-transformers.
+- `nanobot`: external nanobot memory implementation. The nanobot package is not vendored here; set `CEA_MI_NANOBOT_PROJECT` if it is not importable from your environment.
+
+For `mem0` and `memgpt`, the working memory file is created under the run output directory unless you pass `--memory-file`. For `nanobot`, the attack creates isolated SQLite databases so runs do not mutate the configured source database.
+
+## MRMMIA Attack
+
+Run a small Mem0 MRMMIA attack:
 
 ```bash
-source .env
+python3 natural_attack.py \
+  --target mem0 \
+  --dataset perltqa \
+  --num-facts 20 \
+  --max-users 2 \
+  --concurrency 40
 ```
 
-### Multi-GPU Setup (Optional)
-
-For larger models (e.g., 72B), use tensor parallelism across multiple GPUs:
+Run all supported datasets with the shell wrapper:
 
 ```bash
-# Example: 3x A6000 GPUs for a 72B model
-python -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen2.5-72B-Instruct \
-    --tensor-parallel-size 3 \
-    --host 0.0.0.0 \
-    --port 8000
+./run_all_natural_attacks.sh all mem0 auto
 ```
 
-Note: The number of attention heads must be divisible by `tensor-parallel-size`.
-
-## Portable defaults
-
-By default, generated artifacts now stay inside the repository instead of writing
-to an author-specific `/bigtemp/...` path:
-
-- datasets: `./data`
-- evaluation outputs: `./results`
-- nanobot project root: this repository directory
-
-You can override any of the runtime paths with environment variables:
-
-- `CEA_MI_DATA_DIR`
-- `CEA_MI_OUTPUT_DIR`
-- `CEA_MI_NANOBOT_PROJECT`
-- `CEA_MI_NANOBOT_DB_PATH`
-- `CEA_MI_DATASET`
-- `CEA_MI_API_BASE`
-- `CEA_MI_API_KEY`
-- `CEA_MI_MODEL`
-
-Example:
+Pass an API host and port positionally if you do not want to export `CEA_MI_API_BASE`:
 
 ```bash
-export CEA_MI_NANOBOT_PROJECT=/path/to/nanobot
-export CEA_MI_NANOBOT_DB_PATH=~/.nanobot/memory/pmc.db
-export CEA_MI_API_BASE=http://localhost:8000/v1
+./run_all_natural_attacks.sh api-host.example.edu 8001 perltqa mem0 20
 ```
 
-## Quick checks
+Outputs are written under:
 
-Run the portability regression tests:
+```text
+results/<dataset>_<target>_<scorer>_k<direct_probe_k>_seed<seed>/<access>/
+```
+
+Each access directory contains `report.json`, `predictions.json`, `comparison.json`, `meta.json`, and `per_user_metrics.json`.
+
+## Baselines
+
+Run all baselines for one target and dataset:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 baselines/baseline_attacks.py \
+  --target mem0 \
+  --dataset perltqa \
+  --baseline all \
+  --num-facts 20 \
+  --concurrency 10
 ```
 
-Run the synthetic-memory experiment:
+Run selected baselines through the wrapper:
+
+```bash
+./run_baseline_attacks.sh perltqa mem0 naive,mink,reference 20
+```
+
+Baseline access policy is handled internally: loss, Min-K%, and reference run with graybox information; the other baselines run whitebox once and write derived access-level outputs.
+
+## Legacy And Synthetic Entry Points
+
+`main.py` runs the older synthetic fact and decoy-pair experiment against nanobot:
 
 ```bash
 python3 main.py --access blackbox --members 10 --nonmembers 10
 ```
 
-Run the natural-memory attack with an explicit dataset path:
+`mem0_target/` and `memgpt_target/` contain standalone comparison scripts from earlier iterations. They are useful for isolated embedding-memory experiments, but the current recommended path is `natural_attack.py --target mem0` or `natural_attack.py --target memgpt`.
 
-```bash
-python3 natural_attack.py \
-  --access blackbox \
-  --num-facts 30 \
-  --dataset /path/to/benchmark_v2_dataset.json
-```
+## Troubleshooting
 
-Or export `CEA_MI_DATASET=/path/to/benchmark_v2_dataset.json` before using
-`run_all_attacks_v3.sh`.
-
-## Current limitation
-
-`nanobot` is still an external dependency. If its Python package is not importable,
-the attack entry points will fail until `CEA_MI_NANOBOT_PROJECT` is pointed at a
-checkout that contains the `nanobot` module.
+If an attack exits with missing LLM configuration, set both `CEA_MI_API_BASE` and `CEA_MI_MODEL`. If nanobot is not importable, install it in the active environment or set `CEA_MI_NANOBOT_PROJECT` to a checkout containing the package. If you want to keep large generated files out of git, use the ignored `results/` and `logs/` directories.
