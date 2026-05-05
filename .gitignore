@@ -1,6 +1,8 @@
 __pycache__/
 results/
 *.pyc
+*.out
+*.log
 nanobot/
 logs/
 rawdata/
