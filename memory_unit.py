@@ -40,6 +40,7 @@ class MemoryUnit:
     # Source tracking
     user_id: int = 0                           # Which user in perltmem (index)
     source_key: str = ""                       # Original key like "1_0_0" or "Gender"
+    event_id: Optional[str] = None             # Dialogue/event group id used for grouped splits
 
     # Membership label (set during train/test split)
     is_member: bool = False                    # Whether this is in the agent's memory
@@ -62,7 +63,6 @@ class MemoryUnitPair:
     """A memory unit paired with its counterfactual decoy."""
     original: MemoryUnit
     decoy: MemoryUnit
-    hard_negative: Optional[MemoryUnit] = None
 
 
 @dataclass

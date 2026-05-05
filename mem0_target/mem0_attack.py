@@ -36,7 +36,6 @@ from models import (Fact, DecoyPair, Probe, ProbeResult, ProbeType,
                     RoundEvidence, MembershipPrediction, AccessLevel)
 from probe_generator import ProbeGenerator
 from feature_extractor import FeatureExtractor
-from evidence_accumulator import EvidenceAccumulator
 from evaluation import Evaluator
 from natural_attack import (DECOY_VALUES, DEFAULT_DECOYS, load_dataset_facts,
                             build_decoy_fact, build_fact_objects)
@@ -76,22 +75,15 @@ class Mem0Attack:
         self.rng = rng
         self.probe_gen = ProbeGenerator(
             api_base=cfg.api_base, api_key=cfg.api_key,
-            model=cfg.model, num_paraphrases=cfg.paraphrases_per_perspective)
+            model=cfg.model)
         self.feat_ext = FeatureExtractor()
-        self.accumulator = EvidenceAccumulator(
-            prior=cfg.prior,
-            early_stop_threshold=1.0,
-        )
         self.evaluator = Evaluator(bootstrap_n=cfg.bootstrap_n, seed=cfg.seed)
 
-    async def attack_all(self, facts, access_level, calibrate=True):
+    async def attack_all(self, facts, access_level):
         pairs = []
         for f in facts:
             decoy = build_decoy_fact(f, self.rng)
             pairs.append(DecoyPair(fact=f, decoy=decoy))
-
-        if calibrate:
-            await self._calibration_pass(pairs, access_level)
 
         predictions = []
         total = len(pairs)
@@ -107,40 +99,13 @@ class Mem0Attack:
                 log.error("  FAILED: %s", e, exc_info=True)
                 predictions.append(MembershipPrediction(
                     fact_id=pair.fact.id, is_member_true=pair.fact.is_member,
-                    posterior=0.5, score=0.5))
+                    score=0.0))
         return predictions
-
-    async def _calibration_pass(self, pairs, access_level, n_cal=5):
-        member_pairs = [p for p in pairs if p.fact.is_member][:n_cal]
-        nonmem_pairs = [p for p in pairs if not p.fact.is_member][:n_cal]
-        if len(member_pairs) < 2 or len(nonmem_pairs) < 2:
-            return
-
-        member_scores, nonmember_scores = [], []
-        for pair in member_pairs + nonmem_pairs:
-            probe_pairs = await self.probe_gen.generate_probe_family(pair)
-            round_scores = []
-            for probe_f, probe_d in probe_pairs:
-                result_f = await self._execute_probe(probe_f, access_level)
-                result_d = await self._execute_probe(probe_d, access_level)
-                features = self.feat_ext.extract_round_features(
-                    pair.fact, [result_f], [result_d], probe_f.probe_type)
-                round_scores.append(self.feat_ext.compute_round_score(features))
-            mean_score = sum(round_scores) / len(round_scores) if round_scores else 0.0
-            if pair.fact.is_member:
-                member_scores.append(mean_score)
-            else:
-                nonmember_scores.append(mean_score)
-
-        log.info("Calibration: member=%s nonmem=%s",
-                 [f"{s:.4f}" for s in member_scores],
-                 [f"{s:.4f}" for s in nonmember_scores])
-        self.accumulator.calibrate_from_data(member_scores, nonmember_scores)
 
     async def _attack_single(self, pair, access_level):
         probe_pairs = await self.probe_gen.generate_probe_family(pair)
         if not probe_pairs:
-            return MembershipPrediction(fact_id=pair.fact.id, posterior=0.5, score=0.5)
+            return MembershipPrediction(fact_id=pair.fact.id, score=0.0)
 
         evidence_trail = []
         for round_idx, (probe_f, probe_d) in enumerate(probe_pairs):
@@ -164,10 +129,18 @@ class Mem0Attack:
                 fact_results=[result_f], decoy_results=[result_d])
             evidence_trail.append(evidence)
 
-        pred = self.accumulator.accumulate(evidence_trail)
-        if evidence_trail:
-            pred.score = sum(e.delta_score for e in evidence_trail) / len(evidence_trail)
-        return pred
+        final_score = (
+            sum(e.delta_score for e in evidence_trail) / len(evidence_trail)
+            if evidence_trail
+            else 0.0
+        )
+        return MembershipPrediction(
+            fact_id=pair.fact.id,
+            score=final_score,
+            is_member_pred=final_score > 0.0,
+            evidence_trail=evidence_trail,
+            num_rounds_used=len(evidence_trail),
+        )
 
     async def _execute_probe(self, probe, access_level):
         resp = await self.agent.query(probe.question, access_level=access_level)
@@ -201,12 +174,10 @@ async def amain():
     parser.add_argument("--memory-file", default="mem0_memories.json")
     parser.add_argument("--split-file", default=None)
     parser.add_argument("--multi-seed", action="store_true")
-    parser.add_argument("--no-calibrate", action="store_true")
     args = parser.parse_args()
 
     cfg = Config()
     dataset_path = Path(args.dataset)
-    do_calibrate = not args.no_calibrate
     seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
     agent = Mem0Agent(db_path=args.memory_file, vllm_base=cfg.api_base, vllm_model=cfg.model)
@@ -234,7 +205,7 @@ async def amain():
         start = time.time()
         attacker = Mem0Attack(cfg, agent, rng)
         try:
-            predictions = await attacker.attack_all(facts, args.access, calibrate=do_calibrate)
+            predictions = await attacker.attack_all(facts, args.access)
             output_dir = Path(cfg.output_dir) / ("mem0_%s_seed%d" % (args.access, seed))
             report = await attacker.evaluate(predictions, args.access, seed, output_dir)
             elapsed = time.time() - start

@@ -9,7 +9,7 @@ from sklearn.calibration import calibration_curve
 from models import MembershipPrediction, ExperimentResult, AccessLevel
 
 
-TPR_FPR_TARGETS = (0.1, 0.01, 1e-3, 1e-4)
+TPR_FPR_TARGETS = (0.1, 0.01, 0.005, 1e-3, 1e-4)
 
 
 class Evaluator:
@@ -40,8 +40,6 @@ class Evaluator:
 
     @staticmethod
     def _prediction_prob(prediction: MembershipPrediction) -> float:
-        if 0.0 <= prediction.posterior <= 1.0:
-            return float(prediction.posterior)
         return float(Evaluator._to_prob(np.array([prediction.score]))[0])
 
     @staticmethod
@@ -107,7 +105,6 @@ class Evaluator:
             report[f"tpr_at_fpr_{ft}"] = {"value": tp, "ci_lower": tl, "ci_upper": th}
         report["brier_score"] = result.brier_score
         report["ece"] = result.ece
-        report["early_stop_rate"] = sum(1 for p in predictions if p.early_stopped) / len(predictions)
         report["avg_rounds_used"] = float(np.mean([p.num_rounds_used for p in predictions]))
         report["total_queries"] = result.total_queries
         y_pred = np.array([self._prediction_label(p) for p in predictions])
@@ -119,10 +116,134 @@ class Evaluator:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(report, indent=2, default=str))
 
-    def save_predictions(self, predictions, output_path: Path):
-        rows = [{"fact_id": p.fact_id, "is_member_true": p.is_member_true,
-                 "posterior": p.posterior, "llr": p.llr, "score": p.score,
-                 "is_member_pred": p.is_member_pred, "num_rounds": p.num_rounds_used,
-                 "early_stopped": p.early_stopped} for p in predictions]
+    @staticmethod
+    def _probe_type_value(value) -> str:
+        return value.value if hasattr(value, "value") else str(value)
+
+    @staticmethod
+    def _serialize_probe_result(result, evidence, side: str, include_response: bool = False) -> dict:
+        probe = result.probe
+        topic = probe.topic or ""
+        key_value = probe.expected_if_member or ""
+        if side == "fact":
+            topic = topic or evidence.features.get("probe_topic", "")
+            key_value = evidence.features.get("probe_key_value", "") or key_value
+        if Evaluator._probe_type_value(probe.probe_type) == "judge_yes_no":
+            key_value = evidence.features.get("probe_key_value", "")
+        record = {
+            "round_idx": evidence.round_idx,
+            "side": side,
+            "probe_id": probe.id,
+            "probe_type": Evaluator._probe_type_value(probe.probe_type),
+            "topic": topic,
+            "key_value": key_value,
+            "question": probe.question,
+            "expected_if_member": probe.expected_if_member,
+            "expected_if_nonmember": probe.expected_if_nonmember,
+            "perspective_idx": probe.perspective_idx,
+        }
+        if getattr(probe, "metadata", None):
+            record["probe_metadata"] = probe.metadata
+        if include_response:
+            record["response"] = result.response
+            record["latency_ms"] = result.latency_ms
+            record["mean_logprob"] = result.mean_logprob
+            if result.recall_triggered is not None:
+                record["recall_triggered"] = result.recall_triggered
+            if result.recall_top_similarity is not None:
+                record["recall_top_similarity"] = result.recall_top_similarity
+            if result.recall_hit_count is not None:
+                record["recall_hit_count"] = result.recall_hit_count
+            if result.memory_metadata is not None:
+                record["memory_metadata"] = result.memory_metadata
+        return record
+
+    @staticmethod
+    def _serialize_component_scores(features: dict) -> dict:
+        """Raw, unweighted score components used to derive each round score."""
+        keys = [
+            "delta_response_score",
+            "delta_logprob",
+            "raw_delta_logprob",
+            "delta_memory_statement_score",
+            "fact_response_score_mean",
+            "decoy_response_score_mean",
+            "fact_memory_statement_score_max",
+            "decoy_memory_statement_score_max",
+            "fact_memory_statement_score_mean",
+            "decoy_memory_statement_score_mean",
+        ]
+        return {key: features[key] for key in keys if key in features}
+
+    def save_predictions(self, predictions, output_path: Path, include_probe_responses: bool = False):
+        rows = []
+        for p in predictions:
+            row = {
+                "fact_id": p.fact_id,
+                "is_member_true": p.is_member_true,
+                "score": p.score,
+                "is_member_pred": p.is_member_pred,
+                "num_rounds": p.num_rounds_used,
+            }
+            if p.failed_stage:
+                row["failed_stage"] = p.failed_stage
+            if p.failure_reason:
+                row["failure_reason"] = p.failure_reason
+            if p.evidence_trail:
+                probe_records = []
+                for evidence in p.evidence_trail:
+                    probe_records.extend(
+                        self._serialize_probe_result(
+                            result,
+                            evidence,
+                            "fact",
+                            include_response=include_probe_responses,
+                        )
+                        for result in evidence.fact_results
+                    )
+                    probe_records.extend(
+                        self._serialize_probe_result(
+                            result,
+                            evidence,
+                            "decoy",
+                            include_response=include_probe_responses,
+                        )
+                        for result in evidence.decoy_results
+                    )
+                if probe_records:
+                    row["probes"] = probe_records
+                    row["probe_topics"] = [record["topic"] for record in probe_records]
+                    row["probe_key_values"] = [record["key_value"] for record in probe_records]
+
+                row["round_scores"] = [
+                    {
+                        "round_idx": evidence.round_idx,
+                        "probe_type": self._probe_type_value(evidence.probe_type),
+                        "delta_score": evidence.delta_score,
+                        "score_fact": evidence.score_fact,
+                        "score_decoy": evidence.score_decoy,
+                        "component_scores": self._serialize_component_scores(evidence.features),
+                        "features": evidence.features,
+                        "topic": evidence.features.get("probe_topic")
+                        or (
+                            evidence.fact_results[0].probe.topic
+                            if evidence.fact_results
+                            else ""
+                        ),
+                        "key_value": evidence.features.get("probe_key_value")
+                        or (
+                            evidence.fact_results[0].probe.expected_if_member
+                            if evidence.fact_results
+                            else ""
+                        ),
+                        "question": (
+                            evidence.fact_results[0].probe.question
+                            if evidence.fact_results
+                            else ""
+                        ),
+                    }
+                    for evidence in p.evidence_trail
+                ]
+            rows.append(row)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(rows, indent=2))

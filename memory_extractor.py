@@ -1,15 +1,10 @@
 """Memory Extractor for CEA-MIA.
 
-Extracts and splits memory units from perltqa-style datasets.
-Supports LLM-based fact extraction from raw text.
-
-Usage:
-    extractor = MemoryExtractor(
-        dataset_name="perltqa",
-        perlt_types=[PerltType.PROFILE, PerltType.EVENT],
-        seed=42,
-    )
-    dataset = await extractor.extract()
+Extracts dialogue memory units and splits them by conversation/session group.
+For perltqa, dialogue facts are extracted from raw dialogue events. For LOCOMO,
+the dataset-provided session observations are used directly as memory units.
+All facts from the same event/session group are assigned to the same membership
+side.
 """
 from __future__ import annotations
 
@@ -79,9 +74,44 @@ Return JSON array of facts:
 [{{"content": "fact statement"}}]
 """
 
+EXTRACT_MSC_SESSION_PAIR_PROMPT = """\
+Extract memory statements from two MSC conversations between the same two speakers.
+
+Important labels:
+- Speaker 1 and Speaker 2 are the two conversation partners.
+- Write every memory as a standalone third-person sentence, starting with either
+  "Speaker 1" or "Speaker 2".
+- Each memory must be understandable without reading the dialogue and should contain
+  one clear fact only.
+- Extract personal facts, preferences, plans, relationships, jobs, hobbies, locations,
+  experiences, and stable contextual facts that a memory system could store.
+- Do not include generic chit-chat, questions, jokes without factual content, or facts
+  about the outside world.
+- Session 2 memories must be incremental: do NOT repeat facts that are already stated
+  in Session 1, even if the wording is different.
+
+Session 1 dialogue:
+{session1}
+
+Session 2 dialogue:
+{session2}
+
+Return ONLY valid JSON in this exact shape:
+{{
+  "session1_memories": [
+    {{"content": "Speaker 1 ..."}},
+    {{"content": "Speaker 2 ..."}}
+  ],
+  "session2_memories": [
+    {{"content": "Speaker 1 ..."}},
+    {{"content": "Speaker 2 ..."}}
+  ]
+}}
+"""
+
 
 class MemoryExtractor:
-    """Extract and split memory units from perltqa-style datasets."""
+    """Extract and split memory units from supported memory datasets."""
 
     def __init__(
         self,
@@ -96,15 +126,22 @@ class MemoryExtractor:
         """
         Args:
             dataset_name: Name of dataset, maps to rawdata/{dataset_name}/
-            perlt_types: Which types to extract (default: all)
+            perlt_types: Deprecated; extraction is dialogue-only.
             seed: Random seed for reproducible splits
             split_ratio: Fraction to use as members (default: 0.5)
             max_users: Limit number of users to process (for testing)
-            max_concurrency: Max parallel LLM calls for event/dialogue extraction
+            max_concurrency: Max parallel LLM calls for dialogue extraction
             config: Config object for LLM settings
         """
         self.dataset_name = dataset_name
-        self.perlt_types = perlt_types or list(PerltType)
+        if self.dataset_name == "msc" and max_users is None:
+            max_users = 50
+        if perlt_types and perlt_types != [PerltType.DIALOGUE]:
+            log.warning(
+                "Ignoring perlt_types=%s; memory extraction is dialogue-only.",
+                [t.value for t in perlt_types],
+            )
+        self.perlt_types = [PerltType.DIALOGUE]
         self.seed = seed
         self.split_ratio = split_ratio
         self.max_users = max_users
@@ -133,57 +170,43 @@ class MemoryExtractor:
     async def extract(self) -> MemoryDataset:
         """Extract and split memory units from the dataset.
 
-        Split strategy: For each (user, type) group, split units 50/50.
-        This ensures balanced splits within each user and type combination.
+        Split strategy: For each user, group extracted dialogue facts by
+        dialogue event id and split those groups. A single event id is never
+        split across member and non-member memories.
         """
         log.info("Loading dataset: %s", self.dataset_name)
         log.info("Types: %s", [t.value for t in self.perlt_types])
         log.info("Seed: %d, Split ratio: %.2f", self.seed, self.split_ratio)
 
-        # Check if LLM is required but not configured
-        llm_required_types = {PerltType.EVENT, PerltType.DIALOGUE}
-        needs_llm = any(t in llm_required_types for t in self.perlt_types)
-        if needs_llm and not self.config.api_base:
+        # Check if LLM is required but not configured. LOCOMO uses provided
+        # observations directly and does not require LLM extraction.
+        if self.dataset_name != "locomo" and not self.config.api_base:
             log.warning("=" * 60)
-            log.warning("LLM required for event/dialogue extraction but not configured!")
+            log.warning("LLM required for dialogue extraction but not configured!")
             log.warning("Set CEA_MI_API_BASE to your vLLM endpoint (e.g., http://localhost:8000/v1)")
-            log.warning("Event and dialogue types will be skipped.")
+            log.warning("Dialogue extraction will be skipped.")
             log.warning("=" * 60)
 
         # Load raw data
         raw_data = self._load_raw_data()
-        if self.max_users:
+        if self.max_users is not None:
+            self.rng.shuffle(raw_data)
             raw_data = raw_data[:self.max_users]
         log.info("Loaded %d users", len(raw_data))
 
-        # Collect all extractable items grouped by source
-        # Key: (user_idx, source_key), Value: raw data for that item
+        if self.dataset_name == "locomo":
+            return self._extract_locomo_observations(raw_data)
+        if self.dataset_name == "msc":
+            return await self._extract_msc_session_pair_memories(raw_data)
+
+        # Collect dialogue items only. Each raw dialogue carries an event id,
+        # and split labels are assigned at that event-id level after extraction.
         all_items: list[tuple[int, str, PerltType, dict | str]] = []
 
         for user_idx, user_data in enumerate(raw_data):
-            # Profile
-            if PerltType.PROFILE in self.perlt_types:
-                profile = user_data.get("profile", {})
-                if profile:
-                    all_items.append((user_idx, "profile", PerltType.PROFILE, profile))
-
-            # Social relationships
-            if PerltType.SOCIAL_RELATIONSHIP in self.perlt_types:
-                social = user_data.get("social_relationship", {})
-                for rel_key, rel_data in social.items():
-                    all_items.append((user_idx, rel_key, PerltType.SOCIAL_RELATIONSHIP, rel_data))
-
-            # Events
-            if PerltType.EVENT in self.perlt_types:
-                events = user_data.get("events", {})
-                for event_key, event_data in events.items():
-                    all_items.append((user_idx, event_key, PerltType.EVENT, event_data))
-
-            # Dialogues
-            if PerltType.DIALOGUE in self.perlt_types:
-                dialogues = user_data.get("dialogues", {})
-                for dial_key, dial_data in dialogues.items():
-                    all_items.append((user_idx, dial_key, PerltType.DIALOGUE, dial_data))
+            dialogues = user_data.get("dialogues", {})
+            for dial_key, dial_data in dialogues.items():
+                all_items.append((user_idx, dial_key, PerltType.DIALOGUE, dial_data))
 
         log.info("Found %d extractable items", len(all_items))
 
@@ -193,14 +216,12 @@ class MemoryExtractor:
         )
         log.info("Extracted %d total memory units", len(all_units))
 
-        # Group units by user_id first, then by perlt_type within each user
-        user_groups: dict[int, dict[PerltType, list[MemoryUnit]]] = {}
+        # Group units by user_id first, then by dialogue event_id within each user.
+        user_groups: dict[int, dict[str, list[MemoryUnit]]] = {}
         for unit in all_units:
-            if unit.user_id not in user_groups:
-                user_groups[unit.user_id] = {}
-            if unit.perlt_type not in user_groups[unit.user_id]:
-                user_groups[unit.user_id][unit.perlt_type] = []
-            user_groups[unit.user_id][unit.perlt_type].append(unit)
+            event_id = unit.event_id or self._event_id_from_source_key(unit.source_key)
+            unit.event_id = event_id
+            user_groups.setdefault(unit.user_id, {}).setdefault(event_id, []).append(unit)
 
         log.info("Grouped into %d users", len(user_groups))
 
@@ -211,32 +232,42 @@ class MemoryExtractor:
             user_members = []
             user_non_members = []
 
-            for perlt_type, units in user_groups[user_id].items():
-                # Shuffle within this (user, type) group
-                self.rng.shuffle(units)
-                split_idx = int(len(units) * self.split_ratio)
+            event_groups = list(user_groups[user_id].items())
+            self.rng.shuffle(event_groups)
+            split_idx = int(len(event_groups) * self.split_ratio)
+            if len(event_groups) > 1:
+                split_idx = max(1, min(split_idx, len(event_groups) - 1))
 
-                # Handle edge case: if only 1 unit, randomly assign
-                if len(units) == 1:
-                    if self.rng.random() < self.split_ratio:
-                        units[0].is_member = True
-                        user_members.append(units[0])
-                    else:
-                        units[0].is_member = False
-                        user_non_members.append(units[0])
+            for group_idx, (event_id, units) in enumerate(event_groups):
+                is_member_group = group_idx < split_idx
+
+                # Handle edge case: if only 1 event group, randomly assign it.
+                if len(event_groups) == 1:
+                    is_member_group = self.rng.random() < self.split_ratio
+
+                for unit in units:
+                    unit.is_member = is_member_group
+
+                if is_member_group:
+                    user_members.extend(units)
                 else:
-                    # Split: first half members, second half non-members
-                    for unit in units[:split_idx]:
-                        unit.is_member = True
-                        user_members.append(unit)
-                    for unit in units[split_idx:]:
-                        unit.is_member = False
-                        user_non_members.append(unit)
+                    user_non_members.extend(units)
 
-                log.debug("  User %d, %s: %d members, %d non-members",
-                          user_id, perlt_type.value,
-                          len([u for u in units if u.is_member]),
-                          len([u for u in units if not u.is_member]))
+                log.debug(
+                    "  User %d, event_id=%s: %d units -> %s",
+                    user_id,
+                    event_id,
+                    len(units),
+                    "member" if is_member_group else "non-member",
+                )
+
+            if not user_members or not user_non_members:
+                log.warning(
+                    "  User %d has one-sided split after event grouping: %d members, %d non-members",
+                    user_id,
+                    len(user_members),
+                    len(user_non_members),
+                )
 
             user_memory_sets[user_id] = UserMemorySet(
                 user_id=user_id,
@@ -262,13 +293,351 @@ class MemoryExtractor:
     # ── Data loading ──────────────────────────────────────────────────────
 
     def _load_raw_data(self) -> list[dict]:
-        """Load the raw perltmem JSON file."""
+        """Load the raw dataset file."""
+        if self.dataset_name == "locomo":
+            for name in ("locomo10.json", "locomo.json"):
+                data_file = self.data_dir / name
+                if data_file.exists():
+                    with open(data_file, encoding="utf-8") as f:
+                        return json.load(f)
+            raise FileNotFoundError(
+                f"Dataset file not found: {self.data_dir / 'locomo10.json'}"
+            )
+
+        if self.dataset_name == "msc":
+            return self._load_msc_session2_records()
+
         mem_file = self.data_dir / "perltmem_en.json"
         if not mem_file.exists():
             raise FileNotFoundError(f"Dataset file not found: {mem_file}")
 
         with open(mem_file, encoding="utf-8") as f:
             return json.load(f)
+
+    def _load_msc_session2_records(self) -> list[dict]:
+        """Load MSC session_2 JSONL rows.
+
+        Each row contains the current session-2 dialogue plus one previous
+        dialogue, which is the original PersonaChat/session-1 conversation.
+        """
+        session_dir = self.data_dir / "msc" / "msc" / "msc_dialogue" / "session_2"
+        if not session_dir.exists():
+            raise FileNotFoundError(f"MSC session_2 directory not found: {session_dir}")
+
+        records: list[dict] = []
+        for split in ("train", "valid", "test"):
+            path = session_dir / f"{split}.txt"
+            if not path.exists():
+                continue
+            with open(path, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    record["_msc_split"] = split
+                    record["_msc_line_no"] = line_no
+                    records.append(record)
+        return records
+
+    # ── LOCOMO observation extraction ─────────────────────────────────────
+
+    @staticmethod
+    def _sample_id_to_user_id(sample_id: str, fallback_idx: int) -> int:
+        """Map LOCOMO sample ids like ``conv-26`` to stable integer user ids."""
+        if sample_id:
+            suffix = sample_id.rsplit("-", 1)[-1]
+            if suffix.isdigit():
+                return int(suffix)
+        return fallback_idx
+
+    @staticmethod
+    def _locomo_session_sort_key(session_key: str) -> tuple[int, str]:
+        """Sort ``session_10`` after ``session_9``."""
+        stem = session_key.replace("_observation", "")
+        suffix = stem.rsplit("_", 1)[-1]
+        return (int(suffix), stem) if suffix.isdigit() else (10**9, stem)
+
+    def _extract_locomo_observations(self, raw_data: list[dict]) -> MemoryDataset:
+        """Use LOCOMO session observations directly as MemoryUnits.
+
+        Each ``sample_id`` is treated as one user. Within a sample, all
+        observations from the same session are assigned together to either the
+        member or non-member side.
+        """
+        user_memory_sets: dict[int, UserMemorySet] = {}
+
+        for sample_idx, sample in enumerate(raw_data):
+            sample_id = str(sample.get("sample_id") or f"sample_{sample_idx}")
+            user_id = self._sample_id_to_user_id(sample_id, sample_idx)
+            observations = sample.get("observation") or {}
+
+            session_groups: list[tuple[str, list[MemoryUnit]]] = []
+            for obs_key in sorted(observations.keys(), key=self._locomo_session_sort_key):
+                session_obs = observations.get(obs_key) or {}
+                if not isinstance(session_obs, dict):
+                    continue
+
+                session_id = obs_key.replace("_observation", "")
+                event_id = f"{sample_id}:{session_id}"
+                units: list[MemoryUnit] = []
+
+                for speaker, speaker_observations in session_obs.items():
+                    if not isinstance(speaker_observations, list):
+                        continue
+                    for obs_idx, observation in enumerate(speaker_observations):
+                        if not isinstance(observation, list) or not observation:
+                            continue
+                        content = str(observation[0]).strip()
+                        if not content:
+                            continue
+                        evidence = str(observation[1]).strip() if len(observation) > 1 else str(obs_idx)
+                        units.append(MemoryUnit(
+                            content=content,
+                            perlt_type=PerltType.DIALOGUE,
+                            user_id=user_id,
+                            source_key=f"{sample_id}:{session_id}:{speaker}:{evidence}",
+                            event_id=event_id,
+                        ))
+
+                if units:
+                    session_groups.append((event_id, units))
+
+            self.rng.shuffle(session_groups)
+            split_idx = int(len(session_groups) * self.split_ratio)
+            if len(session_groups) > 1:
+                split_idx = max(1, min(split_idx, len(session_groups) - 1))
+
+            user_members: list[MemoryUnit] = []
+            user_non_members: list[MemoryUnit] = []
+
+            for group_idx, (event_id, units) in enumerate(session_groups):
+                is_member_group = group_idx < split_idx
+                if len(session_groups) == 1:
+                    is_member_group = self.rng.random() < self.split_ratio
+
+                for unit in units:
+                    unit.is_member = is_member_group
+
+                if is_member_group:
+                    user_members.extend(units)
+                else:
+                    user_non_members.extend(units)
+
+                log.debug(
+                    "  LOCOMO %s, event_id=%s: %d units -> %s",
+                    sample_id,
+                    event_id,
+                    len(units),
+                    "member" if is_member_group else "non-member",
+                )
+
+            if not user_members or not user_non_members:
+                log.warning(
+                    "  LOCOMO sample %s has one-sided split: %d members, %d non-members",
+                    sample_id,
+                    len(user_members),
+                    len(user_non_members),
+                )
+
+            user_memory_sets[user_id] = UserMemorySet(
+                user_id=user_id,
+                members=user_members,
+                non_members=user_non_members,
+            )
+            log.info(
+                "  LOCOMO sample %s -> user_id=%d: %d members, %d non-members",
+                sample_id,
+                user_id,
+                len(user_members),
+                len(user_non_members),
+            )
+
+        dataset = MemoryDataset(
+            users=user_memory_sets,
+            dataset_name=self.dataset_name,
+            seed=self.seed,
+            perlt_types=self.perlt_types,
+        )
+
+        log.info(
+            "Total: %d members, %d non-members across %d users",
+            len(dataset.all_members),
+            len(dataset.all_non_members),
+            len(dataset.users),
+        )
+        log.info("Dataset stats: %s", dataset.stats())
+        return dataset
+
+    # ── MSC session-pair extraction ───────────────────────────────────────
+
+    @staticmethod
+    def _msc_initial_data_id(record: dict, fallback: str = "") -> str:
+        metadata = record.get("metadata") or {}
+        return (
+            str(metadata.get("initial_data_id") or record.get("initial_data_id") or fallback)
+            .strip()
+        )
+
+    @staticmethod
+    def _msc_turn_speaker(turn: dict, turn_idx: int) -> str:
+        raw_id = str(turn.get("id") or "").strip().lower()
+        if raw_id in {"speaker 1", "bot_0", "0", "speaker_1"}:
+            return "Speaker 1"
+        if raw_id in {"speaker 2", "bot_1", "1", "speaker_2"}:
+            return "Speaker 2"
+        # PersonaChat rows in previous_dialogs often omit speaker ids.
+        return "Speaker 1" if turn_idx % 2 == 0 else "Speaker 2"
+
+    @classmethod
+    def _format_msc_dialogue(cls, dialog: list[dict], max_turns: int = 24) -> str:
+        lines: list[str] = []
+        for idx, turn in enumerate(dialog[:max_turns]):
+            text = str(turn.get("text") or "").strip()
+            if not text:
+                continue
+            speaker = cls._msc_turn_speaker(turn, idx)
+            lines.append(f"{speaker}: {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_memory_text(text: str) -> str:
+        text = " ".join(str(text).lower().split())
+        return "".join(ch for ch in text if ch.isalnum() or ch.isspace()).strip()
+
+    @staticmethod
+    def _coerce_memory_list(value) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        memories: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                content = str(item.get("content") or "").strip()
+            else:
+                content = str(item or "").strip()
+            if content:
+                memories.append(content)
+        return memories
+
+    async def _extract_msc_session_pair_memories(self, raw_data: list[dict]) -> MemoryDataset:
+        """Extract MSC memories from session 1 and session 2 in one LLM call.
+
+        Each MSC row is treated as one user in this benchmark: a fixed pair of
+        conversation partners. Session-1 memories are members; incremental
+        session-2 memories are non-members.
+        """
+        if not self.config.api_base:
+            log.warning("Skipping MSC extraction: LLM API not configured")
+            return MemoryDataset(dataset_name=self.dataset_name, seed=self.seed)
+
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async def extract_one(user_idx: int, record: dict) -> Optional[UserMemorySet]:
+            async with semaphore:
+                return await self._extract_single_msc_pair(user_idx, record)
+
+        tasks = [extract_one(user_idx, record) for user_idx, record in enumerate(raw_data)]
+        results = await asyncio.gather(*tasks)
+
+        user_memory_sets: dict[int, UserMemorySet] = {}
+        for user_set in results:
+            if user_set is not None:
+                user_memory_sets[user_set.user_id] = user_set
+
+        dataset = MemoryDataset(
+            users=user_memory_sets,
+            dataset_name=self.dataset_name,
+            seed=self.seed,
+            perlt_types=self.perlt_types,
+        )
+
+        log.info(
+            "MSC total: %d members, %d non-members across %d pair-users",
+            len(dataset.all_members),
+            len(dataset.all_non_members),
+            len(dataset.users),
+        )
+        log.info("Dataset stats: %s", dataset.stats())
+        return dataset
+
+    async def _extract_single_msc_pair(
+        self,
+        user_idx: int,
+        record: dict,
+    ) -> Optional[UserMemorySet]:
+        conversation_id = self._msc_initial_data_id(record, fallback=f"msc_{user_idx}")
+        previous_dialogs = record.get("previous_dialogs") or []
+        if not previous_dialogs:
+            log.warning("Skipping MSC %s: missing previous_dialogs", conversation_id)
+            return None
+
+        session1_dialog = previous_dialogs[0].get("dialog") or []
+        session2_dialog = record.get("dialog") or []
+        session1_text = self._format_msc_dialogue(session1_dialog)
+        session2_text = self._format_msc_dialogue(session2_dialog)
+        if not session1_text or not session2_text:
+            log.warning("Skipping MSC %s: empty session text", conversation_id)
+            return None
+
+        prompt = EXTRACT_MSC_SESSION_PAIR_PROMPT.format(
+            session1=session1_text[:3500],
+            session2=session2_text[:3500],
+        )
+        payload = await self._call_llm_json(prompt, max_tokens=1536)
+
+        session1_memories = self._coerce_memory_list(payload.get("session1_memories"))
+        session2_memories = self._coerce_memory_list(payload.get("session2_memories"))
+
+        members: list[MemoryUnit] = []
+        non_members: list[MemoryUnit] = []
+        seen_session1: set[str] = set()
+        seen_session2: set[str] = set()
+
+        for idx, content in enumerate(session1_memories):
+            key = self._normalize_memory_text(content)
+            if not key or key in seen_session1:
+                continue
+            seen_session1.add(key)
+            members.append(MemoryUnit(
+                content=content,
+                perlt_type=PerltType.DIALOGUE,
+                user_id=user_idx,
+                source_key=f"msc:{conversation_id}:session_1#{idx}",
+                event_id=f"msc:{conversation_id}:session_1",
+                is_member=True,
+            ))
+
+        for idx, content in enumerate(session2_memories):
+            key = self._normalize_memory_text(content)
+            if not key or key in seen_session2 or key in seen_session1:
+                continue
+            seen_session2.add(key)
+            non_members.append(MemoryUnit(
+                content=content,
+                perlt_type=PerltType.DIALOGUE,
+                user_id=user_idx,
+                source_key=f"msc:{conversation_id}:session_2#{idx}",
+                event_id=f"msc:{conversation_id}:session_2",
+                is_member=False,
+            ))
+
+        if not members or not non_members:
+            log.warning(
+                "Skipping MSC %s: extracted one-sided memories (%d members, %d non-members)",
+                conversation_id,
+                len(members),
+                len(non_members),
+            )
+            return None
+
+        log.info(
+            "  MSC %s -> user_id=%d: %d session1 members, %d session2 non-members",
+            conversation_id,
+            user_idx,
+            len(members),
+            len(non_members),
+        )
+        return UserMemorySet(user_id=user_idx, members=members, non_members=non_members)
 
     # ── Extraction logic ──────────────────────────────────────────────────
 
@@ -353,6 +722,23 @@ class MemoryExtractor:
             return await self._extract_dialogue_llm(user_idx, source_key, data)
         else:
             return []
+
+    @staticmethod
+    def _event_id_from_source_key(source_key: str) -> str:
+        """Recover a dialogue event id from a source key like ``1_0_0#3``."""
+        source_key = source_key or ""
+        return source_key.split("#", 1)[0] or source_key or "unknown"
+
+    @staticmethod
+    def _normalize_event_id(event_ref, fallback_source_key: str) -> str:
+        """Normalize the raw dialogue ``events`` field into a split group key."""
+        if isinstance(event_ref, list):
+            parts = [str(part).strip() for part in event_ref if str(part).strip()]
+            if parts:
+                return "+".join(parts)
+        elif event_ref:
+            return str(event_ref).strip()
+        return MemoryExtractor._event_id_from_source_key(fallback_source_key)
 
     # ── Direct extraction (no LLM needed) ─────────────────────────────────
 
@@ -447,6 +833,7 @@ class MemoryExtractor:
     ) -> list[MemoryUnit]:
         """Extract dialogue facts using LLM (required)."""
         event_ref = dial_data.get("events", "")
+        event_id = self._normalize_event_id(event_ref, source_key)
         contents = dial_data.get("contents", {})
 
         if not contents:
@@ -476,6 +863,7 @@ class MemoryExtractor:
                     perlt_type=PerltType.DIALOGUE,
                     user_id=user_idx,
                     source_key=source_key,
+                    event_id=event_id,
                 ))
             if units:
                 log.debug("Extracted %d facts from dialogue %s", len(units), source_key)
@@ -528,6 +916,38 @@ class MemoryExtractor:
             log.warning("LLM call failed: %s", e)
             return []
 
+    async def _call_llm_json(self, prompt: str, max_tokens: int = 1024) -> dict:
+        """Call LLM and parse a JSON object response."""
+        try:
+            resp = await self.client.post(
+                f"{self.config.api_base}/chat/completions",
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                json={
+                    "model": self.config.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+
+            if "```json" in content:
+                content = content.split("```json", 1)[1].split("```", 1)[0]
+            elif "```" in content:
+                content = content.split("```", 1)[1].split("```", 1)[0]
+
+            parsed = json.loads(content.strip())
+            return parsed if isinstance(parsed, dict) else {}
+
+        except httpx.ConnectError as e:
+            log.warning("Cannot connect to LLM server at %s: %s", self.config.api_base, e)
+            return {}
+        except Exception as e:
+            log.warning("LLM JSON call failed: %s", e)
+            return {}
+
     # ── Save/Load methods ─────────────────────────────────────────────────
 
     def save(self, dataset: MemoryDataset, output_path: Optional[str | Path] = None) -> Path:
@@ -541,9 +961,8 @@ class MemoryExtractor:
             Path to the saved file
         """
         if output_path is None:
-            # Auto-generate filename based on extraction params
-            types_str = "_".join(t.value for t in self.perlt_types)
-            filename = f"{self.dataset_name}_{types_str}_seed{self.seed}.json"
+            # Auto-generate the canonical dataset filename used by attacks.
+            filename = f"{self.dataset_name}_seed{self.seed}.json"
             output_path = Path(__file__).parent / "data" / filename
 
         output_path = Path(output_path)
@@ -557,12 +976,20 @@ class MemoryExtractor:
                 "non_members": [self._unit_to_dict(u) for u in user_set.non_members],
             }
 
+        if self.dataset_name == "locomo":
+            split_unit = "locomo_session"
+        elif self.dataset_name == "msc":
+            split_unit = "msc_session_1_member_session_2_nonmember"
+        else:
+            split_unit = "dialogue_event_id"
+
         output_data = {
             "metadata": {
                 "dataset_name": self.dataset_name,
                 "perlt_types": [t.value for t in self.perlt_types],
                 "seed": self.seed,
                 "split_ratio": self.split_ratio,
+                "split_unit": split_unit,
                 "max_users": self.max_users,
             },
             "stats": dataset.stats(),
@@ -586,6 +1013,7 @@ class MemoryExtractor:
             "topic": unit.topic,
             "user_id": unit.user_id,
             "source_key": unit.source_key,
+            "event_id": unit.event_id,
             "key_value": unit.key_value,
             "is_member": unit.is_member,
         }
@@ -642,6 +1070,7 @@ class MemoryExtractor:
             topic=d.get("topic"),
             user_id=d.get("user_id", 0),
             source_key=d.get("source_key", ""),
+            event_id=d.get("event_id") or MemoryExtractor._event_id_from_source_key(d.get("source_key", "")),
             key_value=d.get("key_value"),
             is_member=is_member,
         )
@@ -663,22 +1092,23 @@ class MemoryExtractor:
 async def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Extract memory units from perltqa dataset")
+    parser = argparse.ArgumentParser(
+        description="Extract dialogue memory units with event/session grouped splits"
+    )
     parser.add_argument("--dataset", default="perltqa", help="Dataset name")
-    parser.add_argument("--types", nargs="+", default=["dialogue"],
-                        choices=["profile", "social_relationship", "event", "dialogue"],
-                        help="Memory types to extract")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-users", type=int, default=5, help="Limit users for testing")
-    parser.add_argument("--max-concurrency", type=int, default=10, help="Max parallel LLM calls")
+    parser.add_argument(
+        "--max-users",
+        type=int,
+        default=None,
+        help="Limit users for testing; default uses all users except msc, which defaults to 50 pair-users",
+    )
+    parser.add_argument("--max-concurrency", type=int, default=32, help="Max parallel LLM calls")
     parser.add_argument("--output", default=None, help="Output JSON file")
     args = parser.parse_args()
 
-    perlt_types = [PerltType(t) for t in args.types]
-
     extractor = MemoryExtractor(
         dataset_name=args.dataset,
-        perlt_types=perlt_types,
         seed=args.seed,
         max_users=args.max_users,
         max_concurrency=args.max_concurrency,

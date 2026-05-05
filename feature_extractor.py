@@ -469,9 +469,9 @@ class FeatureExtractor:
 
     def compute_round_score(self, features: dict) -> float:
         weights = {
-            "delta_response_score": 4.0,
-            "delta_memory_statement_score": 2.0,
-            "delta_logprob": 0.75,
+            "delta_response_score": 1.0,
+            "delta_memory_statement_score": 1.0,
+            "delta_logprob": 1.0,
         }
         s, tw = 0.0, 0.0
         for k, w in weights.items():

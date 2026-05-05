@@ -8,11 +8,10 @@ from typing import Optional
 
 class ProbeType(str, Enum):
     DIRECT_RECALL = "direct_recall"
-    PARAPHRASE = "paraphrase"
     INDIRECT_REASONING = "indirect_reasoning"
-    CONTRADICTION = "contradiction"
     PROVENANCE = "provenance"
     CONFIRMATION = "confirmation"
+    JUDGE_YES_NO = "judge_yes_no"
 
 class AccessLevel(str, Enum):
     WHITEBOX = "whitebox"
@@ -43,7 +42,6 @@ class DecoyPair:
     """A fact paired with its counterfactual decoy."""
     fact: Fact
     decoy: Fact  # same topic/structure, different key_value
-    hard_negative: Optional[Fact] = None  # same topic+time, different fact entirely
 
 @dataclass 
 class Probe:
@@ -51,11 +49,12 @@ class Probe:
     id: str = field(default_factory=_uid)
     fact_id: str = ""
     probe_type: ProbeType = ProbeType.DIRECT_RECALL
+    topic: str = ""
     question: str = ""
     expected_if_member: str = ""    # expected answer if fact is in memory
     expected_if_nonmember: str = "" # expected answer if fact is NOT in memory
     perspective_idx: int = 0
-    paraphrase_idx: int = 0
+    metadata: dict = field(default_factory=dict)
 
 @dataclass
 class ProbeResult:
@@ -93,15 +92,13 @@ class MembershipPrediction:
     """Final prediction for a single fact."""
     fact_id: str = ""
     is_member_true: bool = False
-    # Scores
-    llr: float = 0.0               # cumulative log-likelihood ratio
-    posterior: float = 0.5          # P(member | observations)
     score: float = 0.0             # final scalar score for ROC
     is_member_pred: bool = False
     # Per-round evidence trail
     evidence_trail: list[RoundEvidence] = field(default_factory=list)
     num_rounds_used: int = 0
-    early_stopped: bool = False
+    failed_stage: Optional[str] = None
+    failure_reason: Optional[str] = None
 
 @dataclass
 class ExperimentResult:

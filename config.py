@@ -16,7 +16,7 @@ DEFAULT_API_BASE = os.environ.get("CEA_MI_API_BASE", "http://cheetah04:8000/v1")
 DEFAULT_API_KEY = os.environ.get("CEA_MI_API_KEY", "token-vllm")
 DEFAULT_MODEL = os.environ.get(
     "CEA_MI_MODEL",
-    "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
+    "/bigtemp/trv3px/model_checkpoints/models--Qwen--Qwen2.5-7B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31",
 )
 DEFAULT_NANOBOT_DB_PATH = _env_path(
     "CEA_MI_NANOBOT_DB_PATH",
@@ -49,20 +49,9 @@ class Config:
     seed: int = 42
     seeds: list = field(default_factory=lambda: [42, 123, 456])
 
-    # Probe parameters
-    probe_perspectives: int = 6  # K: number of probe perspectives
-    paraphrases_per_perspective: int = 3  # R: rewrites per perspective
-    max_rounds_whitebox: int = 10
-    max_rounds_graybox: int = 20
-    max_rounds_blackbox: int = 40
-
     # LLM parameters
     temperature: float = 0.7
     max_tokens: int = 1024
-
-    # Scoring
-    prior: float = 0.5  # pi: prior probability of membership
-    early_stop_threshold: float = 0.999  # posterior threshold for early stopping
 
     # Evaluation
     fpr_targets: list = field(default_factory=lambda: [1e-3, 1e-4])

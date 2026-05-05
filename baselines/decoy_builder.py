@@ -7,7 +7,6 @@ Two implementations:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Optional, Union
 
@@ -15,6 +14,12 @@ import httpx
 
 from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
 from http_utils import post_with_retry
+from json_utils import (
+    JsonObjectError,
+    extract_json_object_text,
+    json_error_snippet,
+    loads_json_object,
+)
 from models import Fact, DecoyPair
 from memory_unit import MemoryUnit, MemoryUnitPair, PerltType
 
@@ -26,30 +31,28 @@ log = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 COUNTERFACTUAL_PROMPT = """\
-You are an expert at creating counterfactual statements. Given a personal memory or fact, \
-generate an alternative version that is DIFFERENT but equally plausible and natural.
+Create a counterfactual version of the personal memory.
+
+A valid counterfactual changes one key value so that the original and new
+statement cannot both be true in the same context. Keep the new statement
+equally plausible and natural.
 
 ## Requirements:
-1. **Same structure and format**: Keep the same sentence structure, length, and style
-2. **Different key information**: Change the core fact/value to something plausible but different
-3. **Equally natural**: The alternative should sound just as natural and believable
-4. **Same topic domain**: Stay in the same general category (if about food, stay with food; if about work, stay with work)
-5. **No obvious contradictions**: Don't just negate (e.g., "doesn't like" instead of "likes")
+1. **Preserve context**: Keep the same subject, context, sentence shape, length, and style.
+2. **Mutual exclusion**: Replace one core value with a plausible mutually exclusive value in the same topic/domain.
+3. **No compatible values**: Do not use a value already stated, implied, synonymous, broader/narrower, entailed, or otherwise compatible with the original.
+4. **No negation-only edits**: Do not use negation-only edits.
 
 ## Examples:
 Original: "The user's favorite color is blue."
 Good: "The user's favorite color is green."
-Bad: "The user doesn't have a favorite color." (negation)
 
 Original: "I had lunch with my colleague Sarah at the Italian restaurant downtown yesterday."
 Good: "I had lunch with my colleague Mike at the Thai restaurant near the office yesterday."
-Bad: "I skipped lunch yesterday." (different structure)
 
-Original: "The optimizer learning rate is 7e-4."
-Good: "The optimizer learning rate is 3e-3."
-
-Original: "My mother called me this morning to discuss my sister's wedding plans."
-Good: "My father called me this afternoon to discuss my brother's graduation ceremony."
+Original: "Wang Xiaoming is interested in photography and basketball."
+Good: "Wang Xiaoming is interested in painting and tennis."
+Bad: "Wang Xiaoming is interested in basketball." (basketball is already true in the original)
 
 ## Input:
 {content}
@@ -81,24 +84,24 @@ Return ONLY the new fact, nothing else."""
 
 MEMORY_PAIR_PROMPT = """\
 You are an expert at creating paired memories for contrastive analysis. Given a personal memory, \
-generate a decoy version and extract key metadata for structured comparison.
+design a counterfactual decoy version and extract key metadata for structured comparison.
+The decoy should differ on key value while keeping the same context, and it should not be true at the same time as the original.
 
 ## Key Concept:
-- **topic**: A SINGLE, atomic dimension/axis that can be varied (e.g., "hobby", "favorite color", "job title")
-- **key_value**: The SINGLE value corresponding to that topic
-- **decoy_content**: Change ONLY the key_value, keep ALL other details exactly the same
+- **topic**: A single atomic dimension/axis that can be varied (e.g., "hobby", "favorite color", "job title").
+- **original_key_value**: The value in the original memory for that topic.
+- **decoy_key_value**: A plausible mutually exclusive value for the same topic.
+- **decoy_content**: A counterfactual statement made by replacing only the key_value; keep the same subject, context, sentence structure, and other details. The original and decoy should not both be true in the same context.
 
 ## Requirements:
-1. **Single topic axis**: The topic must represent ONE specific dimension, not multiple combined concepts
-2. **Prefer attributes over names**: Choose to vary the predicate/attribute (hobby, job, tool) rather than subject names when possible
-3. **Minimal change**: The decoy changes ONLY the key_value; all other details remain identical
-4. **Same structure**: Keep the exact same sentence structure, length, and style
-5. **Equally natural**: The decoy should sound just as natural and believable
-6. **No negation**: Don't just negate (e.g., "doesn't like" instead of "likes")
+1. **Atomic topic**: Vary one atomic topic; prefer attributes over names when possible.
+2. **Mutual exclusion**: The decoy value must conflict with the original value on that topic.
+3. **No semantic overlap**: Do not use values already stated/implied by the original, synonyms, paraphrases, broader/narrower values, entailed values, or compatible restatements.
+4. **Multi-value handling**: For multi-value memories, replace the whole value set or choose a different single-valued topic; never use one existing value as the decoy.
+5. **Natural minimal edit**: Avoid negation-only edits and keep the decoy natural.
 
-## Examples:
-
-Original: "Wang Xiaoming is interested in photography."
+## Good examples:
+Input: "Wang Xiaoming is interested in photography."
 Output:
 {{
   "topic": "hobby",
@@ -106,9 +109,17 @@ Output:
   "decoy_key_value": "painting",
   "decoy_content": "Wang Xiaoming is interested in painting."
 }}
-(Note: Change the hobby, keep the person name unchanged)
 
-Original: "Wang Xiaoming uses a smart office solution called iConnect."
+Input: "Wang Xiaoming is interested in photography and basketball."
+Output:
+{{
+  "topic": "hobbies",
+  "original_key_value": "photography and basketball",
+  "decoy_key_value": "painting and tennis",
+  "decoy_content": "Wang Xiaoming is interested in painting and tennis."
+}}
+
+Input: "Wang Xiaoming uses a smart office solution called iConnect."
 Output:
 {{
   "topic": "office tool",
@@ -116,30 +127,12 @@ Output:
   "decoy_key_value": "WorkFlow Pro",
   "decoy_content": "Wang Xiaoming uses a smart office solution called WorkFlow Pro."
 }}
-(Note: Change the tool name, keep the person name unchanged)
-
-Original: "The user's favorite color is blue."
-Output:
-{{
-  "topic": "favorite color",
-  "original_key_value": "blue",
-  "decoy_key_value": "green",
-  "decoy_content": "The user's favorite color is green."
-}}
-
-Original: "The optimizer learning rate is 7e-4."
-Output:
-{{
-  "topic": "learning rate",
-  "original_key_value": "7e-4",
-  "decoy_key_value": "3e-3",
-  "decoy_content": "The optimizer learning rate is 3e-3."
-}}
 
 Bad examples (avoid these):
-- Original: "Wang Xiaoming is interested in photography." → topic: "name", decoy: "Li Xiaohong is interested in photography." (should change hobby, not name)
-- topic: "lunch meeting" with key_value: "Sarah, Italian restaurant" (multiple values combined - should be single axis)
-- Changing multiple things at once
+- topic="name", decoy="Li Xiaohong is interested in photography" for "Wang Xiaoming is interested in photography" (changed the subject, not the attribute)
+- decoy_key_value="basketball" for "photography and basketball" (already true)
+- decoy_key_value="coordination and planning" for "organizing and arranging" (paraphrase)
+- decoy_key_value="concerned about success" for "supports him and is proud" (compatible/entailed)
 
 ## Input:
 {content}
@@ -149,7 +142,7 @@ Return ONLY valid JSON in this exact shape, nothing else:
 {{
   "topic": "single atomic topic/axis (prefer attribute over subject name)",
   "original_key_value": "the single value for that topic",
-  "decoy_key_value": "different plausible value for the same topic",
+  "decoy_key_value": "mutually exclusive plausible value for the same topic",
   "decoy_content": "full sentence with ONLY key_value changed"
 }}
 """
@@ -192,6 +185,16 @@ class LLMDecoyBuilder:
             await self._client.aclose()
             self._client = None
 
+    @staticmethod
+    def _extract_json_text(raw: str) -> str:
+        """Backward-compatible wrapper around the shared JSON extractor."""
+        return extract_json_object_text(raw)
+
+    @staticmethod
+    def _json_error_snippet(text: str, pos: int, window: int = 80) -> str:
+        """Backward-compatible wrapper around the shared JSON error snippet."""
+        return json_error_snippet(text, pos, window=window)
+
     async def _call_llm(self, prompt: str, temperature: Optional[float] = None) -> str:
         """Call vLLM API to generate text with retry on transient failures."""
         temp = temperature if temperature is not None else self.temperature
@@ -210,19 +213,32 @@ class LLMDecoyBuilder:
         content = resp.json()["choices"][0]["message"]["content"]
         return content.strip().strip('"').strip("'")
 
-    @staticmethod
-    def _extract_json_text(content: str) -> str:
-        text = content.strip()
-        if "```json" in text:
-            text = text.split("```json", 1)[1].split("```", 1)[0]
-        elif "```" in text:
-            text = text.split("```", 1)[1].split("```", 1)[0]
-        return text.strip()
-
-    async def _call_llm_json(self, prompt: str, temperature: Optional[float] = None) -> dict:
-        """Call vLLM and parse a JSON object response."""
-        raw = await self._call_llm(prompt, temperature)
-        return json.loads(self._extract_json_text(raw))
+    async def _call_llm_json(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        required_keys: tuple[str, ...] = (),
+    ) -> dict:
+        """Call vLLM and parse a JSON object response, retrying malformed JSON."""
+        attempts = max(1, self.max_retries + 1)
+        last_error: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            call_temperature = temperature if attempt == 1 else 0.0
+            raw = await self._call_llm(prompt, call_temperature)
+            try:
+                return loads_json_object(raw, required_keys=required_keys)
+            except JsonObjectError as exc:
+                last_error = exc
+                log.warning(
+                    "LLM returned invalid JSON for decoy pair "
+                    "(attempt %d/%d): %s | raw=%r",
+                    attempt,
+                    attempts,
+                    exc,
+                    raw[:500].replace("\n", "\\n"),
+                )
+        assert last_error is not None
+        raise last_error
 
     # ── Building counterfactual decoys ─────────────────────────────────────
 
@@ -241,21 +257,6 @@ class LLMDecoyBuilder:
         prompt = COUNTERFACTUAL_PROMPT.format(content=content)
         return await self._call_llm(prompt, temperature)
 
-    async def build_hard_negative(
-        self, content: str, temperature: Optional[float] = None
-    ) -> str:
-        """Generate a hard negative: same domain but different fact.
-
-        Args:
-            content: The original fact/memory content
-            temperature: Optional override for generation temperature
-
-        Returns:
-            The hard negative content string
-        """
-        prompt = HARD_NEGATIVE_PROMPT.format(content=content)
-        return await self._call_llm(prompt, temperature or 0.9)
-
     # ── MemoryUnit support ─────────────────────────────────────────────────
 
     async def build_decoy_for_memory(self, unit: MemoryUnit) -> MemoryUnit:
@@ -268,8 +269,33 @@ class LLMDecoyBuilder:
         prompt = MEMORY_PAIR_PROMPT.format(
             content=unit.content,
         )
-        payload = await self._call_llm_json(prompt, temperature=self.temperature)
+        required_keys = ("topic", "original_key_value", "decoy_key_value", "decoy_content")
+        attempts = max(1, self.max_retries + 1)
+        last_error: Optional[Exception] = None
 
+        for attempt in range(1, attempts + 1):
+            try:
+                payload = await self._call_llm_json(
+                    prompt,
+                    temperature=self.temperature if attempt == 1 else 0.0,
+                    required_keys=required_keys,
+                )
+                return self._memory_pair_from_payload(unit, payload)
+            except Exception as exc:
+                last_error = exc
+                log.warning(
+                    "Invalid decoy pair for unit %s (attempt %d/%d): %s | payload_source=%r",
+                    unit.id,
+                    attempt,
+                    attempts,
+                    exc,
+                    unit.content[:180].replace("\n", " "),
+                )
+
+        raise ValueError(f"Failed to build valid decoy pair after {attempts} attempts") from last_error
+
+    @staticmethod
+    def _memory_pair_from_payload(unit: MemoryUnit, payload: dict) -> MemoryUnitPair:
         topic = (payload.get("topic") or unit.topic or "").strip() or None
         original_key_value = (
             payload.get("original_key_value")
@@ -281,10 +307,12 @@ class LLMDecoyBuilder:
         decoy_content = (payload.get("decoy_content") or "").strip()
 
         if not decoy_content:
-            raise ValueError("LLM did not return decoy_content for memory pair")
+            raise ValueError("LLM did not return non-empty decoy_content for memory pair")
         if not decoy_key_value:
-            raise ValueError("LLM did not return decoy_key_value for memory pair")
-        if original_key_value and decoy_key_value.lower() == original_key_value.lower():
+            raise ValueError("LLM did not return non-empty decoy_key_value for memory pair")
+        if not original_key_value:
+            raise ValueError("LLM did not return non-empty original_key_value for memory pair")
+        if decoy_key_value.lower() == original_key_value.lower():
             raise ValueError("LLM returned an unchanged decoy_key_value for memory pair")
 
         original = MemoryUnit(
@@ -325,25 +353,10 @@ class LLMDecoyBuilder:
             is_member=False,
         )
 
-    async def build_hard_negative_for_fact(self, fact: Fact) -> Fact:
-        """Build a hard negative for a Fact (legacy model)."""
-        neg_content = await self.build_hard_negative(fact.content)
-
-        return Fact(
-            content=neg_content,
-            topic=fact.topic + "_hard_neg",
-            key_value="[llm_generated]",
-            category=fact.category,
-            is_member=False,
-        )
-
     async def build_decoy_pair_for_fact(self, fact: Fact) -> DecoyPair:
-        """Build a full decoy pair for a Fact."""
-        decoy, hard_neg = await asyncio.gather(
-            self.build_decoy_for_fact(fact),
-            self.build_hard_negative_for_fact(fact),
-        )
-        return DecoyPair(fact=fact, decoy=decoy, hard_negative=hard_neg)
+        """Build a counterfactual decoy pair for a Fact."""
+        decoy = await self.build_decoy_for_fact(fact)
+        return DecoyPair(fact=fact, decoy=decoy)
 
     # ── Batch processing ───────────────────────────────────────────────────
 
@@ -370,7 +383,7 @@ class LLMDecoyBuilder:
                         return await self.build_decoy_pair_for_memory(item)
                     else:
                         pair = await self.build_decoy_pair_for_fact(item)
-                        return (pair.fact, pair.decoy, pair.hard_negative)
+                        return (pair.fact, pair.decoy)
                 except Exception as e:
                     log.warning("Failed to build decoy for %s: %s", item.content[:50], e)
                     return None
@@ -435,46 +448,10 @@ Reply with ONLY the alternative fact, nothing else."""
             is_member=False,
         )
 
-    async def build_hard_negative(self, fact: Fact) -> Fact:
-        """Generate a hard negative: same topic domain but entirely different fact."""
-        prompt = f"""Given this fact about a user:
-"{fact.content}"
-
-Generate a DIFFERENT fact about the same general topic domain (e.g., if it's about food preference, generate a different food-related fact). The fact should:
-1. Be about the same general domain
-2. Contain DIFFERENT specific information
-3. Be plausible as a real user fact
-
-Reply with ONLY the fact, nothing else."""
-
-        resp = await post_with_retry(
-            self.client,
-            f"{self.api_base}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.9,
-                "max_tokens": 128,
-            },
-        )
-        content = resp.json()["choices"][0]["message"]["content"].strip().strip('"')
-
-        return Fact(
-            content=content,
-            topic=fact.topic + "_hard_neg",
-            key_value="[llm_generated]",
-            category=fact.category,
-            is_member=False,
-        )
-
     async def build_decoy_pair(self, fact: Fact) -> DecoyPair:
-        """Build a full decoy pair with both counterfactual and hard negative."""
-        decoy, hard_neg = await asyncio.gather(
-            self.build_llm_decoy(fact),
-            self.build_hard_negative(fact),
-        )
-        return DecoyPair(fact=fact, decoy=decoy, hard_negative=hard_neg)
+        """Build a counterfactual decoy pair."""
+        decoy = await self.build_llm_decoy(fact)
+        return DecoyPair(fact=fact, decoy=decoy)
 
     async def close(self):
         await self.client.aclose()

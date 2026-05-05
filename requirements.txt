@@ -1,4 +1,23 @@
-httpx>=0.27
-numpy>=1.24
-scikit-learn>=1.3
-pydantic>=2.0
+# CEA-MI experiment client dependencies.
+#
+# This environment is intended to run the attack scripts and call a separate
+# OpenAI-compatible vLLM server over HTTP. Do not install vLLM or ParlAI here
+# unless you intentionally want a combined server/data-prep environment.
+
+httpx>=0.27,<1
+numpy>=1.24,<2
+scikit-learn>=1.3,<2
+pydantic>=2,<3
+vllm==0.19.1
+
+# Lightweight Mem0/MemGPT-style targets use sentence-transformers for local
+# embedding retrieval. Keep this on the 2.x line to avoid pulling newer training
+# stack imports that conflict with old datasets/ParlAI environments.
+sentence-transformers==2.7.0
+transformers>=4.41,<5
+huggingface-hub>=0.23,<1
+tokenizers>=0.19,<0.21
+
+# Optional but useful when the embedding stack needs dataset utilities. This is
+# compatible with huggingface-hub <1 and avoids the old HfFolder import issue.
+datasets>=2.19,<3

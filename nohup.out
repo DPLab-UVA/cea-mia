@@ -1,0 +1,132 @@
+/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+OpenBLAS blas_thread_init: pthread_create failed for thread 46 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 22 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 47 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 23 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 24 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 25 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 26 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 27 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 28 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 29 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 30 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 31 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 32 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 33 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 34 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 35 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 36 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 37 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 38 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 39 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 40 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 41 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 42 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 43 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 44 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 45 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 46 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+OpenBLAS blas_thread_init: pthread_create failed for thread 47 of 48: Resource temporarily unavailable
+OpenBLAS blas_thread_init: RLIMIT_NPROC 2000 current, 2000 max
+Traceback (most recent call last):
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/entrypoints/openai/api_server.py", line 25, in <module>
+    from vllm.config import ModelConfig, VllmConfig
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/config/__init__.py", line 19, in <module>
+    from vllm.config.model import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/config/model.py", line 29, in <module>
+    from vllm.transformers_utils.config import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/transformers_utils/config.py", line 37, in <module>
+    from .gguf_utils import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/transformers_utils/gguf_utils.py", line 9, in <module>
+    import gguf
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/gguf/__init__.py", line 7, in <module>
+    from .vocab import *
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/gguf/vocab.py", line 17, in <module>
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer # pyright: ignore[reportMissingImports]
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/mistral.py", line 15, in <module>
+    from mistral_common.protocol.instruct.normalize import InstructRequestNormalizer, get_normalizer
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/protocol/instruct/normalize.py", line 28, in <module>
+    from mistral_common.tokens.tokenizers.base import InstructRequestType, TokenizerVersion
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/base.py", line 23, in <module>
+    from mistral_common.tokens.tokenizers.image import ImageEncoder
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/image.py", line 17, in <module>
+    if is_opencv_installed():
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/imports.py", line 40, in is_opencv_installed
+    import cv2  # noqa: F401
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/cv2/__init__.py", line 181, in <module>
+    bootstrap()
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/cv2/__init__.py", line 153, in bootstrap
+    native_module = importlib.import_module("cv2")
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/entrypoints/openai/api_server.py", line 25, in <module>
+    from vllm.config import ModelConfig, VllmConfig
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/config/__init__.py", line 19, in <module>
+    from vllm.config.model import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/config/model.py", line 29, in <module>
+    from vllm.transformers_utils.config import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/transformers_utils/config.py", line 37, in <module>
+    from .gguf_utils import (
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/vllm/transformers_utils/gguf_utils.py", line 9, in <module>
+    import gguf
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/gguf/__init__.py", line 7, in <module>
+    from .vocab import *
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/gguf/vocab.py", line 17, in <module>
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer # pyright: ignore[reportMissingImports]
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/mistral.py", line 15, in <module>
+    from mistral_common.protocol.instruct.normalize import InstructRequestNormalizer, get_normalizer
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/protocol/instruct/normalize.py", line 28, in <module>
+    from mistral_common.tokens.tokenizers.base import InstructRequestType, TokenizerVersion
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/base.py", line 23, in <module>
+    from mistral_common.tokens.tokenizers.image import ImageEncoder
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/tokens/tokenizers/image.py", line 17, in <module>
+    if is_opencv_installed():
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/mistral_common/imports.py", line 40, in is_opencv_installed
+    import cv2  # noqa: F401
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/cv2/__init__.py", line 181, in <module>
+    bootstrap()
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/site-packages/cv2/__init__.py", line 153, in bootstrap
+    native_module = importlib.import_module("cv2")
+  File "/p/pkq2psproject/envs/agent/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+KeyboardInterrupt
