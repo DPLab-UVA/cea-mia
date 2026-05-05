@@ -273,6 +273,11 @@ async def amain():
         )
 
     cfg = Config()
+    try:
+        cfg.require_llm_config()
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if args.db:
         cfg.nanobot_db_path = Path(args.db)
     if args.target == "nanobot" and args.memory_file:

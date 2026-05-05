@@ -13,7 +13,7 @@ Usage:
   ./run_baseline_attacks.sh [api_server] [api_port] [dataset] [memory_target] [baseline_name] [num_facts]
 
 Positional arguments:
-  api_server     Optional vLLM/OpenAI API server, e.g. dplab06.
+  api_server     Optional vLLM/OpenAI API host, e.g. api-host.example.edu.
   api_port       Optional vLLM/OpenAI API port, e.g. 8001. Empty/default uses CEA_MI_API_BASE as-is.
   dataset        Dataset name, or all for perltqa -> locomo -> msc. Default: perltqa.
   memory_target  nanobot, mem0, or memgpt. Default: nanobot.
@@ -34,10 +34,10 @@ Other settings are controlled by environment variables:
   CEA_MI_API_BASE, CEA_MI_API_SERVER/CEA_MI_API_HOST, CUDA_VISIBLE_DEVICES.
 
 Examples:
-  ./run_baseline_attacks.sh 8000 perltqa nanobot all
-  ./run_baseline_attacks.sh dplab06 8001 perltqa mem0 mink
-  ./run_baseline_attacks.sh 8001 perltqa mem0 mink
-  ./run_baseline_attacks.sh 8002 msc memgpt reference none
+  CEA_MI_API_BASE=http://127.0.0.1:8000/v1 ./run_baseline_attacks.sh perltqa nanobot all
+  ./run_baseline_attacks.sh api-host.example.edu 8001 perltqa mem0 mink
+  CEA_MI_API_BASE=http://127.0.0.1:8001/v1 ./run_baseline_attacks.sh perltqa mem0 mink
+  CEA_MI_API_BASE=http://127.0.0.1:8002/v1 ./run_baseline_attacks.sh msc memgpt reference none
 EOF
 }
 
@@ -206,7 +206,7 @@ replace_api_port() {
   local port="$2"
 
   if [[ -z "$base" ]]; then
-    base="http://127.0.0.1:8000/v1"
+    die "api_port requires CEA_MI_API_BASE, or pass both api_server and api_port"
   fi
 
   if [[ "$base" =~ ^(https?://[^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
@@ -227,7 +227,7 @@ compose_api_base() {
   local prefix
 
   if [[ -z "$port" ]]; then
-    die "api_server requires api_port, e.g. ./run_baseline_attacks.sh dplab06 8001 gray ..."
+    die "api_server requires api_port, e.g. ./run_baseline_attacks.sh api-host.example.edu 8001 perltqa mem0"
   fi
 
   if [[ "$server" =~ ^(https?://[^/:/]+)(:[0-9]+)?(/.*)?$ ]]; then
@@ -282,7 +282,7 @@ echo "Num facts request: $REQUESTED_NUM_FACTS"
 echo "Access policy:     loss/mink/reference=graybox; others=whitebox with derived blackbox/graybox/whitebox outputs"
 echo "Baseline request:  $BASELINE_NAME"
 echo "Baseline sequence: $BASELINE_LIST"
-echo "API base:          ${CEA_MI_API_BASE:-<config default>}"
+echo "API base:          ${CEA_MI_API_BASE:-<required: CEA_MI_API_BASE or api_server/api_port>}"
 echo "CUDA devices:      ${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "Seed:              $SEED"
 echo "Concurrency:       $CONCURRENCY"

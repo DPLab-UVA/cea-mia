@@ -160,6 +160,7 @@ class Mem0Target(_EmbeddingMemoryTarget):
             db_path=self.memory_file,
             vllm_base=self.cfg.api_base,
             vllm_model=self.cfg.model,
+            vllm_api_key=self.cfg.api_key,
         )
 
 
@@ -176,6 +177,7 @@ class MemGPTTarget(_EmbeddingMemoryTarget):
             db_path=self.memory_file,
             vllm_base=self.cfg.api_base,
             vllm_model=self.cfg.model,
+            vllm_api_key=self.cfg.api_key,
         )
 
 

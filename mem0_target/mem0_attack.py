@@ -7,16 +7,16 @@ different prompt injection styles for memory-augmented agents.
 
 Usage:
     # First set up the target:
-    python setup_mem0.py standalone --dataset /bigtemp/trv3px/benchmark_v2_dataset.json
+    python setup_mem0.py standalone --dataset data/perltqa_seed42.json
 
     # Then run the attack:
-    python mem0_attack.py --access blackbox --num-facts 30 --seed 42
+    python mem0_attack.py --dataset data/perltqa_seed42.json --access blackbox --num-facts 30 --seed 42
 
     # All access levels:
     for access in blackbox graybox whitebox; do
-        python mem0_attack.py --access $access --num-facts 30 --seed 42 \
+        python mem0_attack.py --dataset data/perltqa_seed42.json --access $access --num-facts 30 --seed 42 \
             --memory-file mem0_memories.json \
-            2>&1 | tee /bigtemp/trv3px/attack_mem0_${access}.log
+            2>&1 | tee logs/attack_mem0_${access}.log
     done
 """
 from __future__ import annotations
@@ -170,17 +170,26 @@ async def amain():
     parser.add_argument("--access", choices=["blackbox", "graybox", "whitebox"], default="blackbox")
     parser.add_argument("--num-facts", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--dataset", default="/bigtemp/trv3px/benchmark_v2_dataset.json")
+    parser.add_argument("--dataset", required=True)
     parser.add_argument("--memory-file", default="mem0_memories.json")
     parser.add_argument("--split-file", default=None)
     parser.add_argument("--multi-seed", action="store_true")
     args = parser.parse_args()
 
     cfg = Config()
+    try:
+        cfg.require_llm_config()
+    except ValueError as exc:
+        parser.error(str(exc))
     dataset_path = Path(args.dataset)
     seeds = [42, 123, 456] if args.multi_seed else [args.seed]
 
-    agent = Mem0Agent(db_path=args.memory_file, vllm_base=cfg.api_base, vllm_model=cfg.model)
+    agent = Mem0Agent(
+        db_path=args.memory_file,
+        vllm_base=cfg.api_base,
+        vllm_model=cfg.model,
+        vllm_api_key=cfg.api_key,
+    )
 
     dataset_facts = load_dataset_facts(dataset_path)
     split_file = args.split_file or str(Path(args.memory_file).with_suffix(".split.json"))

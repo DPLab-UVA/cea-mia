@@ -1,45 +1,55 @@
-#!/bin/bash
-# Baseline attacks: Naive (blackbox), Min-K% (graybox, Shi'24), Reference Model (whitebox)
-source activate /bigtemp/trv3px/conda_envs/memgpt2
-cd /bigtemp/trv3px/cea_mi
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Baseline attack helper for the three supported targets.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+: "${CEA_MI_API_BASE:?Set CEA_MI_API_BASE to your OpenAI-compatible /v1 endpoint}"
+: "${CEA_MI_MODEL:?Set CEA_MI_MODEL to the model name/path served by that endpoint}"
+
+DATASET="${CEA_MI_DATASET:-perltqa}"
+NUM_FACTS="${CEA_MI_NUM_FACTS:-20}"
+SEED="${CEA_MI_SEED:-42}"
+CONCURRENCY="${CEA_MI_CONCURRENCY:-40}"
+LOG_DIR="${CEA_MI_LOG_DIR:-logs}"
+NANOBOT_DB="${CEA_MI_NANOBOT_DB_PATH:-$HOME/.nanobot/memory/pmc.db}"
+
+mkdir -p "$LOG_DIR"
 
 for TARGET in memgpt mem0; do
-    if [ "$TARGET" = "memgpt" ]; then
-        MEM="memgpt_memories.json"
+    if [[ "$TARGET" == "memgpt" ]]; then
+        MEMORY_FILE="${CEA_MI_MEMGPT_MEMORY_FILE:-memgpt_memories.json}"
     else
-        MEM="mem0_memories.json"
+        MEMORY_FILE="${CEA_MI_MEM0_MEMORY_FILE:-mem0_memories.json}"
     fi
 
-    echo "=== ${TARGET} Blackbox: Naive Single Query ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access blackbox --num-facts 20 --seed 42 --concurrency 40 \
-        --memory-file ${MEM} --baseline naive \
-        2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_blackbox.log
-
-    echo "=== ${TARGET} Graybox: Min-K% Prob (Shi'24) ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 20 --seed 42 --concurrency 40 \
-        --memory-file ${MEM} --baseline mink \
-        2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_graybox.log
-
-    echo "=== ${TARGET} Whitebox: Reference Model (Carlini'22) ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 20 --seed 42 --concurrency 40 \
-        --memory-file ${MEM} --baseline reference \
-        2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_whitebox.log
+    for BASELINE in naive mink reference; do
+        echo "=== ${TARGET} baseline=${BASELINE} ==="
+        python3 baselines/baseline_attacks.py \
+            --target "$TARGET" \
+            --dataset "$DATASET" \
+            --num-facts "$NUM_FACTS" \
+            --seed "$SEED" \
+            --concurrency "$CONCURRENCY" \
+            --memory-file "$MEMORY_FILE" \
+            --baseline "$BASELINE" \
+            2>&1 | tee "$LOG_DIR/baselines_${TARGET}_${BASELINE}.log"
+    done
 done
 
-# Nanobot
-echo "=== Nanobot Blackbox: Naive Single Query ==="
-python3 baselines/baseline_attacks.py --target nanobot --access blackbox --num-facts 20 --seed 42 --concurrency 40 \
-    --db ~/.nanobot/memory/pmc.db --baseline naive \
-    2>&1 | tee /bigtemp/trv3px/baselines_nanobot_blackbox.log
-
-echo "=== Nanobot Graybox: Min-K% Prob (Shi'24) ==="
-python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 20 --seed 42 --concurrency 40 \
-    --db ~/.nanobot/memory/pmc.db --baseline mink \
-    2>&1 | tee /bigtemp/trv3px/baselines_nanobot_graybox.log
-
-echo "=== Nanobot Whitebox: Reference Model (Carlini'22) ==="
-python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 20 --seed 42 --concurrency 40 \
-    --db ~/.nanobot/memory/pmc.db --baseline reference \
-    2>&1 | tee /bigtemp/trv3px/baselines_nanobot_whitebox.log
+for BASELINE in naive mink reference; do
+    echo "=== nanobot baseline=${BASELINE} ==="
+    python3 baselines/baseline_attacks.py \
+        --target nanobot \
+        --dataset "$DATASET" \
+        --num-facts "$NUM_FACTS" \
+        --seed "$SEED" \
+        --concurrency "$CONCURRENCY" \
+        --db "$NANOBOT_DB" \
+        --baseline "$BASELINE" \
+        2>&1 | tee "$LOG_DIR/baselines_nanobot_${BASELINE}.log"
+done
 
 echo "=== ALL BASELINES DONE ==="

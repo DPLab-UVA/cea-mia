@@ -256,12 +256,14 @@ def load_target_agent(target: str, memory_file: str, cfg: Config, db_path: Optio
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "memgpt_target"))
         from setup_memgpt import EmbeddingMemoryAgent
         return EmbeddingMemoryAgent(db_path=memory_file,
-                                    vllm_base=cfg.api_base, vllm_model=cfg.model)
+                                    vllm_base=cfg.api_base, vllm_model=cfg.model,
+                                    vllm_api_key=cfg.api_key)
     elif target == "mem0":
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mem0_target"))
         from setup_mem0 import Mem0Agent
         return Mem0Agent(db_path=memory_file,
-                         vllm_base=cfg.api_base, vllm_model=cfg.model)
+                         vllm_base=cfg.api_base, vllm_model=cfg.model,
+                         vllm_api_key=cfg.api_key)
     elif target == "nanobot":
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from agent_interface import AgentInterface
@@ -1786,6 +1788,10 @@ async def amain():
         )
 
     cfg = Config()
+    try:
+        cfg.require_llm_config()
+    except ValueError as exc:
+        parser.error(str(exc))
     cfg.seed = args.seed
 
     # Default memory files per target
