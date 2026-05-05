@@ -5,16 +5,16 @@ import json
 import logging
 import sys
 import time
+from pathlib import Path
 
 from config import Config
 from models import (Fact, DecoyPair, Probe, ProbeResult, ProbeType,
                     RoundEvidence, MembershipPrediction, AccessLevel)
 from data_loader import DataLoader
-from decoy_builder import DecoyBuilder
+from baselines.decoy_builder import DecoyBuilder
 from probe_generator import ProbeGenerator
 from agent_interface import AgentInterface
 from feature_extractor import FeatureExtractor
-from evidence_accumulator import EvidenceAccumulator
 from evaluation import Evaluator
 from experiment_db import prepare_isolated_memory_db
 from probe_batches import group_probe_pairs_by_round
@@ -34,10 +34,8 @@ class CEAMIExperiment:
             max_tokens=self.cfg.max_tokens)
         self.probe_gen = ProbeGenerator(
             api_base=self.cfg.api_base, api_key=self.cfg.api_key,
-            model=self.cfg.model, num_paraphrases=self.cfg.paraphrases_per_perspective)
+            model=self.cfg.model)
         self.feat_ext = FeatureExtractor()
-        self.accumulator = EvidenceAccumulator(
-            prior=self.cfg.prior, early_stop_threshold=self.cfg.early_stop_threshold)
         self.evaluator = Evaluator(bootstrap_n=self.cfg.bootstrap_n, seed=self.cfg.seed)
 
     def _prepare_isolated_memory_db(self, access_level: str, seed: int) -> Path:
@@ -82,23 +80,19 @@ class CEAMIExperiment:
                 pred = await self._attack_single(pair, access_level)
                 pred.is_member_true = pair.fact.is_member
                 predictions.append(pred)
-                logger.info("  posterior=%.3f true=%s rounds=%d",
-                            pred.posterior, pred.is_member_true, pred.num_rounds_used)
+                logger.info("  score=%.3f true=%s rounds=%d",
+                            pred.score, pred.is_member_true, pred.num_rounds_used)
             except Exception as e:
                 logger.error("  FAILED: %s", e)
                 predictions.append(MembershipPrediction(
                     fact_id=pair.fact.id, is_member_true=pair.fact.is_member,
-                    posterior=0.5, score=0.5))
+                    score=0.0))
         return predictions
 
     async def _attack_single(self, pair, access_level):
         probe_pairs = await self.probe_gen.generate_probe_family(pair)
         evidence_trail = []
-        max_rounds = {"whitebox": self.cfg.max_rounds_whitebox,
-                      "graybox": self.cfg.max_rounds_graybox,
-                      "blackbox": self.cfg.max_rounds_blackbox}.get(access_level, 40)
-        grouped_probe_pairs = group_probe_pairs_by_round(probe_pairs, max_rounds=max_rounds)
-        for round_idx, probe_batch in enumerate(grouped_probe_pairs):
+        for round_idx, probe_batch in enumerate(group_probe_pairs_by_round(probe_pairs)):
             batch_fact_results = []
             batch_decoy_results = []
             for probe_f, probe_d in probe_batch:
@@ -117,10 +111,19 @@ class CEAMIExperiment:
                 delta_score=score, features=features,
                 fact_results=batch_fact_results, decoy_results=batch_decoy_results)
             evidence_trail.append(evidence)
-            temp_pred = self.accumulator.accumulate(evidence_trail)
-            if temp_pred.early_stopped:
-                break
-        return self.accumulator.accumulate(evidence_trail)
+
+        final_score = (
+            sum(e.delta_score for e in evidence_trail) / len(evidence_trail)
+            if evidence_trail
+            else 0.0
+        )
+        return MembershipPrediction(
+            fact_id=pair.fact.id,
+            score=final_score,
+            is_member_pred=final_score > 0.0,
+            evidence_trail=evidence_trail,
+            num_rounds_used=len(evidence_trail),
+        )
 
     async def _execute_probe(self, probe, access_level):
         resp = await self.agent.query(probe.question, access_level=access_level)

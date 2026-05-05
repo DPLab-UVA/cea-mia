@@ -11,34 +11,34 @@ for TARGET in memgpt mem0; do
     fi
 
     echo "=== ${TARGET} Blackbox: Naive Single Query ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access blackbox --num-facts 30 --seed 42 \
+    python3 baselines/baseline_attacks.py --target ${TARGET} --access blackbox --num-facts 20 --seed 42 --concurrency 40 \
         --memory-file ${MEM} --baseline naive \
         2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_blackbox.log
 
     echo "=== ${TARGET} Graybox: Min-K% Prob (Shi'24) ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 30 --seed 42 \
+    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 20 --seed 42 --concurrency 40 \
         --memory-file ${MEM} --baseline mink \
         2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_graybox.log
 
     echo "=== ${TARGET} Whitebox: Reference Model (Carlini'22) ==="
-    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 30 --seed 42 \
+    python3 baselines/baseline_attacks.py --target ${TARGET} --access graybox --num-facts 20 --seed 42 --concurrency 40 \
         --memory-file ${MEM} --baseline reference \
         2>&1 | tee /bigtemp/trv3px/baselines_${TARGET}_whitebox.log
 done
 
 # Nanobot
 echo "=== Nanobot Blackbox: Naive Single Query ==="
-python3 baselines/baseline_attacks.py --target nanobot --access blackbox --num-facts 30 --seed 42 \
+python3 baselines/baseline_attacks.py --target nanobot --access blackbox --num-facts 20 --seed 42 --concurrency 40 \
     --db ~/.nanobot/memory/pmc.db --baseline naive \
     2>&1 | tee /bigtemp/trv3px/baselines_nanobot_blackbox.log
 
 echo "=== Nanobot Graybox: Min-K% Prob (Shi'24) ==="
-python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 30 --seed 42 \
+python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 20 --seed 42 --concurrency 40 \
     --db ~/.nanobot/memory/pmc.db --baseline mink \
     2>&1 | tee /bigtemp/trv3px/baselines_nanobot_graybox.log
 
 echo "=== Nanobot Whitebox: Reference Model (Carlini'22) ==="
-python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 30 --seed 42 \
+python3 baselines/baseline_attacks.py --target nanobot --access graybox --num-facts 20 --seed 42 --concurrency 40 \
     --db ~/.nanobot/memory/pmc.db --baseline reference \
     2>&1 | tee /bigtemp/trv3px/baselines_nanobot_whitebox.log
 

@@ -7,7 +7,6 @@ and decoy share the same question structure (only expected answers differ).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Optional
 
@@ -15,10 +14,22 @@ import httpx
 
 from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
 from http_utils import post_with_retry
+from json_utils import JsonObjectError, loads_json_object
 from models import Fact, Probe, ProbeType, DecoyPair
 from memory_unit import MemoryUnit, MemoryUnitPair, PerltType
 
 log = logging.getLogger(__name__)
+
+
+class ShortDirectProbeSetError(JsonObjectError):
+    """Raised when a direct probe set is valid but shorter than requested."""
+
+    def __init__(self, expected: int, probe_specs: list[dict[str, str]]):
+        self.expected = expected
+        self.probe_specs = probe_specs
+        super().__init__(
+            f"expected at least {expected} probes, got {len(probe_specs)}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -55,6 +66,54 @@ Output: {{"question_a": "What research did Dr. Wang present at the 2023 conferen
 
 Output ONLY valid JSON:
 {{"question_a": "the question", "question_b": "the question"}}
+"""
+
+MULTI_DIRECT_RECALL_PROMPT = """\
+Generate exactly {k} direct-recall probes for a memory membership inference attack.
+
+Candidate memory statement:
+"{content}"
+
+Requirements:
+1. Each probe must be a natural and specific direct recall question whose answer is a concise value entailed by the memory.
+   The same question must also ask for the source/reason for the answer, using a short follow-up such as
+   "How do you know that?", "Where did you get this information?", or "What memory tells you this?"
+2. Do NOT ask yes/no questions.
+3. Do NOT put the answer/key_value directly in the question.
+4. Prefer probes that target different atomic topics or slots in the memory, such as person, location,
+   date, event, relationship, organization, action, object, preference, or outcome.
+5. Include non-answer context from the memory when it helps disambiguate the probe. Do not include the key_value itself as context.
+6. If the memory contains fewer than {k} distinct atomic topics, first cover as many distinct
+   topics as possible, then fill the remaining probes with natural paraphrases or different
+   contextual framings of those available direct-recall question(s).
+7. The source/reason follow-up should make it hard to answer from generic world knowledge alone; prefer asking
+   what remembered fact, prior conversation, or stored information supports the answer.
+8. Return exactly {k} probe objects.
+
+For each probe:
+- topic: the atomic slot being queried
+- key_value: the concise expected answer if this memory is present
+- question: the direct recall question plus a short source/reason follow-up
+
+Example when k=5 and three distinct topics are available:
+Memory: "Alice bought a blue backpack at Target."
+Output:
+{{
+  "probes": [
+    {{"topic": "person", "key_value": "Alice", "question": "Who bought a blue backpack at Target? How do you know that?"}},
+    {{"topic": "item", "key_value": "blue backpack", "question": "What did Alice buy at Target? Where did you get this information?"}},
+    {{"topic": "store", "key_value": "Target", "question": "Where did Alice buy the backpack? What memory tells you this?"}},
+    {{"topic": "store", "key_value": "Target", "question": "Which store did Alice buy the backpack at? What prior information supports your answer?"}},
+    {{"topic": "item", "key_value": "blue backpack", "question": "What kind of backpack did Alice buy at Target? How are you sure?"}}
+  ]
+}}
+
+Output ONLY valid JSON:
+{{
+  "probes": [
+    {{"topic": "atomic topic", "key_value": "expected answer", "question": "direct recall question plus source/reason follow-up"}}
+  ]
+}}
 """
 
 INDIRECT_REASONING_PROMPT = """\
@@ -155,21 +214,11 @@ Output ONLY valid JSON:
 {{"question_a": "question confirming key_value_a", "question_b": "question confirming key_value_b"}}
 """
 
-PARAPHRASE_PROMPT = """\
-Rephrase this question {n} different ways. Keep the same meaning and intent.
-The question is asking about personal information, so keep it natural and conversational.
-
-Original: {question}
-
-Output ONLY the rephrased questions, one per line, numbered 1-{n}. No explanations.
-"""
-
-
 class ProbeGenerator:
     """Generate probe questions using LLM for flexible, natural probing.
 
     For a memory pair (original, decoy), generates ONE set of questions
-    that both share (except confirmation which needs value-specific questions).
+    that both share, except confirmation which needs value-specific questions.
     """
 
     def __init__(
@@ -177,14 +226,14 @@ class ProbeGenerator:
         api_base: str = DEFAULT_API_BASE,
         api_key: str = DEFAULT_API_KEY,
         model: str = DEFAULT_MODEL,
-        num_paraphrases: int = 3,
         temperature: float = 0.7,
+        max_retries: int = 2,
     ):
         self.api_base = api_base
         self.api_key = api_key
         self.model = model
-        self.num_paraphrases = num_paraphrases
         self.temperature = temperature
+        self.max_retries = max_retries
         self._client: Optional[httpx.AsyncClient] = None
 
     @property
@@ -200,7 +249,12 @@ class ProbeGenerator:
 
     # ── LLM Calls ─────────────────────────────────────────────────────────
 
-    async def _call_llm(self, prompt: str, temperature: Optional[float] = None) -> str:
+    async def _call_llm(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: int = 256,
+    ) -> str:
         """Call LLM API to generate text with retry on transient failures."""
         temp = temperature if temperature is not None else self.temperature
         resp = await post_with_retry(
@@ -211,7 +265,7 @@ class ProbeGenerator:
                 "model": self.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temp,
-                "max_tokens": 256,
+                "max_tokens": max_tokens,
             },
         )
         return resp.json()["choices"][0]["message"]["content"].strip().strip('"')
@@ -220,13 +274,140 @@ class ProbeGenerator:
 
     def _parse_question_pair(self, raw: str) -> tuple[str, str]:
         """Parse JSON response containing question_a and question_b."""
-        text = raw.strip()
-        if "```json" in text:
-            text = text.split("```json", 1)[1].split("```", 1)[0]
-        elif "```" in text:
-            text = text.split("```", 1)[1].split("```", 1)[0]
-        result = json.loads(text.strip())
-        return result["question_a"], result["question_b"]
+        result = loads_json_object(raw, required_keys=("question_a", "question_b"))
+        question_a = (result.get("question_a") or "").strip()
+        question_b = (result.get("question_b") or "").strip()
+        if not question_a or not question_b:
+            raise JsonObjectError("question_a/question_b must be non-empty strings")
+        return question_a, question_b
+
+    def _parse_direct_recall_probe_set(self, raw: str, k: int) -> list[dict[str, str]]:
+        """Parse JSON response containing a list of direct-recall probes."""
+        result = loads_json_object(raw, required_keys=("probes",))
+        probes = result.get("probes")
+        if not isinstance(probes, list):
+            raise JsonObjectError("probes must be a list")
+
+        parsed = []
+        for idx, item in enumerate(probes[:k], start=1):
+            if not isinstance(item, dict):
+                raise JsonObjectError(f"probe {idx} must be an object")
+            topic = str(item.get("topic") or "").strip()
+            key_value = str(item.get("key_value") or "").strip()
+            question = str(item.get("question") or "").strip()
+            if not topic or not key_value or not question:
+                raise JsonObjectError(
+                    f"probe {idx} must include non-empty topic, key_value, and question"
+                )
+            parsed.append({
+                "topic": topic,
+                "key_value": key_value,
+                "question": question,
+            })
+        if len(parsed) < k:
+            raise ShortDirectProbeSetError(k, parsed)
+        return parsed
+
+    @staticmethod
+    def _build_direct_recall_probes(
+        fact_id: str,
+        probe_specs: list[dict[str, str]],
+    ) -> list[Probe]:
+        return [
+            Probe(
+                fact_id=fact_id,
+                probe_type=ProbeType.DIRECT_RECALL,
+                topic=spec["topic"],
+                question=spec["question"],
+                expected_if_member=spec["key_value"],
+                perspective_idx=idx,
+            )
+            for idx, spec in enumerate(probe_specs)
+        ]
+
+    async def _generate_question_pair(self, prompt: str, probe_name: str) -> tuple[str, str]:
+        attempts = max(1, self.max_retries + 1)
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            raw = await self._call_llm(
+                prompt,
+                self.temperature if attempt == 1 else 0.0,
+            )
+            try:
+                return self._parse_question_pair(raw)
+            except JsonObjectError as exc:
+                last_error = exc
+                log.warning(
+                    "Invalid probe JSON for %s (attempt %d/%d): %s | raw=%r",
+                    probe_name,
+                    attempt,
+                    attempts,
+                    exc,
+                    raw[:500].replace("\n", "\\n"),
+                )
+
+        raise ValueError(f"Failed to generate valid {probe_name} probe JSON after {attempts} attempts") from last_error
+
+    async def generate_direct_recall_probe_set(
+        self,
+        content: str,
+        fact_id: str,
+        k: int,
+    ) -> list[Probe]:
+        """Generate k direct-recall probes in one LLM call."""
+        k = max(1, int(k))
+        prompt = MULTI_DIRECT_RECALL_PROMPT.format(k=k, content=content)
+        attempts = max(1, self.max_retries + 1)
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            raw = await self._call_llm(
+                prompt,
+                self.temperature if attempt == 1 else 0.0,
+                max_tokens=max(384, 160 * k),
+            )
+            try:
+                probe_specs = self._parse_direct_recall_probe_set(raw, k)
+                return self._build_direct_recall_probes(fact_id, probe_specs)
+            except ShortDirectProbeSetError as exc:
+                last_error = exc
+                log.warning(
+                    "Invalid multi direct probe JSON for fact %s (attempt %d/%d): %s | raw=%r",
+                    fact_id,
+                    attempt,
+                    attempts,
+                    exc,
+                    raw[:500].replace("\n", "\\n"),
+                )
+            except JsonObjectError as exc:
+                last_error = exc
+                log.warning(
+                    "Invalid multi direct probe JSON for fact %s (attempt %d/%d): %s | raw=%r",
+                    fact_id,
+                    attempt,
+                    attempts,
+                    exc,
+                    raw[:500].replace("\n", "\\n"),
+                )
+
+        if (
+            isinstance(last_error, ShortDirectProbeSetError)
+            and last_error.probe_specs
+        ):
+            log.warning(
+                "Using %d/%d generated direct probes for fact %s after %d attempts; "
+                "fallback applies only because the JSON was valid but short",
+                len(last_error.probe_specs),
+                k,
+                fact_id,
+                attempts,
+            )
+            return self._build_direct_recall_probes(fact_id, last_error.probe_specs)
+
+        raise ValueError(
+            f"Failed to generate valid multi direct probe JSON after {attempts} attempts"
+        ) from last_error
 
     async def generate_direct_recall(
         self,
@@ -244,8 +425,7 @@ class ProbeGenerator:
             content_b=content_b,
             key_value_b=key_value_b,
         )
-        raw = await self._call_llm(prompt)
-        return self._parse_question_pair(raw)
+        return await self._generate_question_pair(prompt, "direct_recall")
 
     async def generate_indirect_reasoning(
         self,
@@ -263,8 +443,7 @@ class ProbeGenerator:
             content_b=content_b,
             key_value_b=key_value_b,
         )
-        raw = await self._call_llm(prompt)
-        return self._parse_question_pair(raw)
+        return await self._generate_question_pair(prompt, "indirect_reasoning")
 
     async def generate_provenance(
         self,
@@ -282,8 +461,7 @@ class ProbeGenerator:
             content_b=content_b,
             key_value_b=key_value_b,
         )
-        raw = await self._call_llm(prompt)
-        return self._parse_question_pair(raw)
+        return await self._generate_question_pair(prompt, "provenance")
 
     async def generate_confirmation(
         self,
@@ -301,25 +479,7 @@ class ProbeGenerator:
             content_b=content_b,
             key_value_b=key_value_b,
         )
-        raw = await self._call_llm(prompt)
-        return self._parse_question_pair(raw)
-
-    async def generate_paraphrases(self, base_question: str, n: int = 3) -> list[str]:
-        """Generate paraphrases of a question."""
-        if n <= 0:
-            return []
-        prompt = PARAPHRASE_PROMPT.format(question=base_question, n=n)
-        try:
-            text = await self._call_llm(prompt, temperature=0.9)
-            lines = [
-                line.strip().lstrip("0123456789.)- ")
-                for line in text.strip().split("\n")
-                if line.strip()
-            ]
-            return [line for line in lines if len(line) > 10][:n]
-        except Exception as e:
-            log.warning("Failed to generate paraphrases: %s", e)
-            return [base_question]
+        return await self._generate_question_pair(prompt, "confirmation")
 
     # ── Helper Methods ────────────────────────────────────────────────────
 
@@ -396,101 +556,78 @@ class ProbeGenerator:
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.DIRECT_RECALL,
+                topic=topic,
                 question=fact_direct_q,
                 expected_if_member=fact.key_value,
                 perspective_idx=0,
-                paraphrase_idx=0,
             ),
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.DIRECT_RECALL,
+                topic=topic,
                 question=decoy_direct_q,
                 expected_if_member=decoy.key_value,
                 perspective_idx=0,
-                paraphrase_idx=0,
             ),
         ))
 
-        # 2. Paraphrase variants of direct recall
-        if self.num_paraphrases > 0:
-            paraphrases = await self.generate_paraphrases(fact_direct_q, self.num_paraphrases)
-            for i, pq in enumerate(paraphrases):
-                probe_pairs.append((
-                    Probe(
-                        fact_id=fact.id,
-                        probe_type=ProbeType.PARAPHRASE,
-                        question=pq,
-                        expected_if_member=fact.key_value,
-                        perspective_idx=1,
-                        paraphrase_idx=i,
-                    ),
-                    Probe(
-                        fact_id=fact.id,
-                        probe_type=ProbeType.PARAPHRASE,
-                        question=pq,
-                        expected_if_member=decoy.key_value,
-                        perspective_idx=1,
-                        paraphrase_idx=i,
-                    ),
-                ))
-
-        # 3. Indirect reasoning (structurally identical questions)
+        # 2. Indirect reasoning (structurally identical questions)
         probe_pairs.append((
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.INDIRECT_REASONING,
+                topic=topic,
                 question=fact_indirect_q,
                 expected_if_member=fact.key_value,
                 perspective_idx=2,
-                paraphrase_idx=0,
             ),
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.INDIRECT_REASONING,
+                topic=topic,
                 question=decoy_indirect_q,
                 expected_if_member=decoy.key_value,
                 perspective_idx=2,
-                paraphrase_idx=0,
             ),
         ))
 
-        # 4. Provenance (structurally identical questions)
+        # 3. Provenance (structurally identical questions)
         probe_pairs.append((
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.PROVENANCE,
+                topic=topic,
                 question=fact_provenance_q,
                 expected_if_member=fact.key_value,
                 perspective_idx=3,
-                paraphrase_idx=0,
             ),
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.PROVENANCE,
+                topic=topic,
                 question=decoy_provenance_q,
                 expected_if_member=decoy.key_value,
                 perspective_idx=3,
-                paraphrase_idx=0,
             ),
         ))
 
-        # 5. Confirmation (different questions for fact and decoy, each mentions its value)
+        # 4. Confirmation (different questions for fact and decoy, each mentions its value)
         probe_pairs.append((
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.CONFIRMATION,
+                topic=topic,
                 question=fact_confirm_q,
                 expected_if_member=fact.key_value,
                 perspective_idx=4,
-                paraphrase_idx=0,
             ),
             Probe(
                 fact_id=fact.id,
                 probe_type=ProbeType.CONFIRMATION,
+                topic=topic,
                 question=decoy_confirm_q,
                 expected_if_member=decoy.key_value,
                 perspective_idx=4,
-                paraphrase_idx=0,
             ),
         ))
 

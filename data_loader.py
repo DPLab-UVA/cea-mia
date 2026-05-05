@@ -87,8 +87,8 @@ class DataLoader:
 
         return members, nonmembers
 
-    def build_decoy_pairs(self, facts: list[Fact], all_facts: list[Fact]) -> list[DecoyPair]:
-        """For each fact, construct a counterfactual decoy (f-) and optional hard negative."""
+    def build_decoy_pairs(self, facts: list[Fact], all_facts: list[Fact] | None = None) -> list[DecoyPair]:
+        """For each fact, construct a counterfactual decoy."""
         pairs = []
         for fact in facts:
             # Find the template for this fact
@@ -117,13 +117,7 @@ class DataLoader:
                 is_member=False,
             )
 
-            # Hard negative: same topic category but different fact
-            hard_neg = None
-            same_cat = [f for f in all_facts if f.category == fact.category and f.id != fact.id]
-            if same_cat:
-                hard_neg = self.rng.choice(same_cat)
-
-            pairs.append(DecoyPair(fact=fact, decoy=decoy, hard_negative=hard_neg))
+            pairs.append(DecoyPair(fact=fact, decoy=decoy))
 
         return pairs
 
@@ -144,7 +138,6 @@ class DataLoader:
                 {
                     "fact": fact_to_dict(p.fact),
                     "decoy": fact_to_dict(p.decoy),
-                    "hard_negative": fact_to_dict(p.hard_negative) if p.hard_negative else None,
                 }
                 for p in pairs
             ],

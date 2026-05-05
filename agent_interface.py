@@ -100,14 +100,16 @@ class AgentInterface:
 
     def clear_all_memory(self):
         """Wipe all memory tables."""
-        conn = sqlite3.connect(str(self.db_path))
+        if self._store:
+            self._store.close()
+            self._store = None
+            self._recall = None
+
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         for table in ("episodic", "semantic", "procedural"):
             conn.execute(f"DELETE FROM {table}")
         conn.commit()
         conn.close()
-        # Reset cached store/recall
-        self._store = None
-        self._recall = None
 
     def snapshot_memory(self, snapshot_path: Path) -> Path:
         """Copy the current memory DB to a snapshot file."""
@@ -217,7 +219,7 @@ You are nanobot, a helpful AI assistant running locally.
 
     async def query_blackbox(self, message: str, session_history: list[dict] = None) -> dict:
         """Black-box query: text response only."""
-        recalled = self.recall_engine.recall(message)
+        recalled = self.recall_engine.recall(message, update_access=False)
         memory_prompt = recalled.format_for_prompt()
 
         messages = [{"role": "system", "content": self._build_system_prompt(memory_prompt)}]
@@ -249,7 +251,7 @@ You are nanobot, a helpful AI assistant running locally.
 
     async def query_graybox(self, message: str, session_history: list[dict] = None) -> dict:
         """Gray-box query: text + logprobs."""
-        recalled = self.recall_engine.recall(message)
+        recalled = self.recall_engine.recall(message, update_access=False)
         memory_prompt = recalled.format_for_prompt()
 
         messages = [{"role": "system", "content": self._build_system_prompt(memory_prompt)}]
@@ -293,7 +295,7 @@ You are nanobot, a helpful AI assistant running locally.
         """White-box query: text + logprobs + memory recall details."""
         # Get detailed recall info first
         recall_scores = self.get_recall_scores(message)
-        recalled = self.recall_engine.recall(message)
+        recalled = self.recall_engine.recall(message, update_access=False)
         memory_prompt = recalled.format_for_prompt()
 
         messages = [{"role": "system", "content": self._build_system_prompt(memory_prompt)}]
