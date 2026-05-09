@@ -27,6 +27,8 @@ Dataset-dependent num_facts when num_facts=auto:
 Other settings are controlled by environment variables:
   CEA_MI_SEED, CEA_MI_CONCURRENCY, CEA_MI_RESPONSE_SCORER,
   CEA_MI_MAX_USERS, CEA_MI_DIRECT_PROBE_K, CEA_MI_SAVE_PROBE_RESPONSES,
+  CEA_MI_CANDIDATE_PARAPHRASE, CEA_MI_PARAPHRASE_TEMPERATURE,
+  CEA_MI_PARAPHRASE_CONCURRENCY, CEA_MI_PARAPHRASE_CACHE,
   CEA_MI_NANOBOT_DB_PATH, CEA_MI_LOG_DIR,
   CEA_MI_RESULTS_DIR, CEA_MI_API_BASE, CEA_MI_API_SERVER/CEA_MI_API_HOST,
   CUDA_VISIBLE_DEVICES.
@@ -120,6 +122,10 @@ SEED="${CEA_MI_SEED:-42}"
 CONCURRENCY="${CEA_MI_CONCURRENCY:-40}"
 RESPONSE_SCORER="${CEA_MI_RESPONSE_SCORER:-llm}"
 DIRECT_PROBE_K="${CEA_MI_DIRECT_PROBE_K:-5}"
+CANDIDATE_PARAPHRASE="${CEA_MI_CANDIDATE_PARAPHRASE:-none}"
+PARAPHRASE_TEMPERATURE="${CEA_MI_PARAPHRASE_TEMPERATURE:-0.3}"
+PARAPHRASE_CONCURRENCY="${CEA_MI_PARAPHRASE_CONCURRENCY:-20}"
+PARAPHRASE_CACHE="${CEA_MI_PARAPHRASE_CACHE:-}"
 SAVE_PROBE_RESPONSES="${CEA_MI_SAVE_PROBE_RESPONSES:-0}"
 MAX_USERS="${CEA_MI_MAX_USERS:-}"
 DB_PATH="${CEA_MI_NANOBOT_DB_PATH:-}"
@@ -252,6 +258,7 @@ echo "Seed:            $SEED"
 echo "Concurrency:     $CONCURRENCY"
 echo "Direct probe k:  $DIRECT_PROBE_K"
 echo "Scorer:          $RESPONSE_SCORER"
+echo "Candidate para:  $CANDIDATE_PARAPHRASE"
 echo "Results dir:     $RESULTS_DIR"
 echo "Log dir:         $LOG_DIR"
 echo
@@ -272,6 +279,9 @@ for DATASET_ITEM in $DATASET_LIST; do
     --concurrency "$CONCURRENCY"
     --direct-probe-k "$DIRECT_PROBE_K"
     --response-scorer "$RESPONSE_SCORER"
+    --candidate-paraphrase "$CANDIDATE_PARAPHRASE"
+    --paraphrase-temperature "$PARAPHRASE_TEMPERATURE"
+    --paraphrase-concurrency "$PARAPHRASE_CONCURRENCY"
     --output-path "$RESULTS_DIR"
   )
 
@@ -283,13 +293,21 @@ for DATASET_ITEM in $DATASET_LIST; do
     1|true|yes|y|on) COMMON_ARGS+=(--save-probe-responses) ;;
   esac
 
+  if [[ -n "$PARAPHRASE_CACHE" ]]; then
+    COMMON_ARGS+=(--paraphrase-cache "$PARAPHRASE_CACHE")
+  fi
+
   if [[ "$MEMORY_TARGET" == "nanobot" && -n "$DB_PATH" ]]; then
     COMMON_ARGS+=(--db "$DB_PATH")
   elif [[ "$MEMORY_TARGET" != "nanobot" && -n "$DB_PATH" ]]; then
     echo "Note: CEA_MI_NANOBOT_DB_PATH is ignored for ${MEMORY_TARGET}." >&2
   fi
 
-  OUTPUT_NAME="${DATASET_LABEL}_${MEMORY_TARGET}_${RESPONSE_SCORER}_k${DIRECT_PROBE_K}_seed${SEED}"
+  PARAPHRASE_SUFFIX=""
+  if [[ "$CANDIDATE_PARAPHRASE" != "none" ]]; then
+    PARAPHRASE_SUFFIX="_candidate-${CANDIDATE_PARAPHRASE}"
+  fi
+  OUTPUT_NAME="${DATASET_LABEL}_${MEMORY_TARGET}_${RESPONSE_SCORER}_k${DIRECT_PROBE_K}${PARAPHRASE_SUFFIX}_seed${SEED}"
   OUTPUT_PATH="$RESULTS_DIR/$OUTPUT_NAME"
   LOG_PATH="$LOG_DIR/${OUTPUT_NAME}${PORT_LABEL}.log"
 

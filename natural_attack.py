@@ -28,6 +28,7 @@ from memory_attack_utils import (
     resolve_memory_dataset_path,
     sample_attack_units_per_user,
 )
+from memory_paraphraser import MemoryParaphraser
 from memory_unit import MemoryDataset
 from models import AccessLevel, MembershipPrediction
 from multi_probe_attack import MultiProbeDirectAttack
@@ -49,6 +50,7 @@ class NaturalAttack:
         target: str = "nanobot",
         memory_file: Optional[Path] = None,
         direct_probe_k: int = 5,
+        candidate_paraphrase: str = "none",
     ):
         self.cfg = cfg
         self.rng = rng
@@ -57,6 +59,10 @@ class NaturalAttack:
         self.target = target
         self.memory_file = Path(memory_file) if memory_file else None
         self.direct_probe_k = max(1, int(direct_probe_k))
+        self.candidate_paraphrase = candidate_paraphrase
+        self.paraphrase_runtime_seconds: Optional[float] = None
+        self.paraphrase_cache_path: Optional[Path] = None
+        self.paraphrase_record_count: int = 0
         self.agent = load_target_agent(
             target,
             cfg,
@@ -181,6 +187,15 @@ class NaturalAttack:
             report["runtime_scope"] = "attack execution through prediction generation; excludes metrics/report serialization"
         report["direct_probe_k"] = self.direct_probe_k
         report["probe_generation"] = "single LLM call generating k direct-recall probes per memory"
+        report["candidate_paraphrase"] = self.candidate_paraphrase
+        if self.candidate_paraphrase != "none":
+            report["candidate_memory_source"] = "semantic paraphrase of sampled attack units"
+            report["injected_memory_source"] = "original dataset member memory units"
+            report["candidate_paraphrase_runtime_seconds"] = self.paraphrase_runtime_seconds
+            report["candidate_paraphrase_cache_path"] = (
+                str(self.paraphrase_cache_path) if self.paraphrase_cache_path else None
+            )
+            report["candidate_paraphrase_record_count"] = self.paraphrase_record_count
         report["probe_type_ablation"] = compute_probe_type_ablation(
             predictions,
             al,
@@ -255,6 +270,32 @@ async def amain():
         help="Number of direct recall probes generated per memory",
     )
     parser.add_argument(
+        "--candidate-paraphrase",
+        choices=["none", "semantic"],
+        default="none",
+        help=(
+            "Optionally paraphrase sampled candidate memory units before probe "
+            "generation/scoring; injected target memories remain original"
+        ),
+    )
+    parser.add_argument(
+        "--paraphrase-temperature",
+        type=float,
+        default=0.3,
+        help="LLM temperature used for semantic candidate paraphrasing",
+    )
+    parser.add_argument(
+        "--paraphrase-concurrency",
+        type=int,
+        default=20,
+        help="Max concurrent LLM calls for candidate paraphrasing",
+    )
+    parser.add_argument(
+        "--paraphrase-cache",
+        default=None,
+        help="Optional JSON cache path for candidate paraphrases",
+    )
+    parser.add_argument(
         "--response-scorer",
         choices=["rules", "llm"],
         default="rules",
@@ -300,7 +341,11 @@ async def amain():
     log.info("Loaded MemoryDataset from %s", dataset_path)
     log.info("Dataset stats: %s", dataset.stats())
     log.info("Using up to %s users", args.max_users if args.max_users is not None else "all")
-    log.info("Default algorithm: multi_probe_direct_no_contrastive (k=%d)", args.direct_probe_k)
+    log.info(
+        "Default algorithm: multi_probe_direct_no_contrastive (k=%d, candidate_paraphrase=%s)",
+        args.direct_probe_k,
+        args.candidate_paraphrase,
+    )
     log.info("=" * 60)
 
     all_reports = []
@@ -324,9 +369,14 @@ async def amain():
         )
 
         run_access = "whitebox"
+        paraphrase_suffix = (
+            ""
+            if args.candidate_paraphrase == "none"
+            else f"_candidate-{args.candidate_paraphrase}"
+        )
         output_name = (
             f"{dataset_name}_{args.target}_{args.response_scorer}"
-            f"_k{args.direct_probe_k}_seed{seed}"
+            f"_k{args.direct_probe_k}{paraphrase_suffix}_seed{seed}"
         )
         if args.output_path:
             output_dir = Path(args.output_path) / output_name
@@ -341,7 +391,10 @@ async def amain():
                 output_dir=cfg.output_dir,
                 seed=seed,
                 access_level=run_access,
-                algo_name=f"multi_probe_{args.response_scorer}_{args.target}",
+                algo_name=(
+                    f"multi_probe_{args.response_scorer}_{args.target}"
+                    f"{paraphrase_suffix}"
+                ),
             )
             cfg.nanobot_db_path = isolated_db
             log.info("Created isolated DB: %s", isolated_db)
@@ -357,7 +410,7 @@ async def amain():
         log.info("=" * 60)
         log.info("CEA-MI Natural Memory Attack (multi-probe direct)")
         log.info(
-            "Target: %s | Run access: %s | Derived access: %s | Units/class/user: %s | Seed: %d | Concurrency: %d | Scorer: %s | k: %d",
+            "Target: %s | Run access: %s | Derived access: %s | Units/class/user: %s | Seed: %d | Concurrency: %d | Scorer: %s | k: %d | Candidate paraphrase: %s",
             args.target,
             run_access,
             ",".join(ACCESS_DERIVATION_ORDER),
@@ -366,6 +419,7 @@ async def amain():
             args.concurrency,
             args.response_scorer,
             args.direct_probe_k,
+            args.candidate_paraphrase,
         )
         if args.target == "nanobot":
             log.info("DB: %s", cfg.nanobot_db_path)
@@ -380,6 +434,51 @@ async def amain():
         )
         log.info("=" * 60)
 
+        attack_user_sets = user_attack_sets
+        paraphrase_runtime_seconds: Optional[float] = None
+        paraphrase_cache_path: Optional[Path] = None
+        paraphrase_record_count = 0
+        if args.candidate_paraphrase != "none":
+            output_dir.mkdir(parents=True, exist_ok=True)
+            paraphrase_cache_path = (
+                Path(args.paraphrase_cache).expanduser()
+                if args.paraphrase_cache
+                else output_dir / f"candidate_paraphrase_{args.candidate_paraphrase}_cache.json"
+            )
+            paraphraser = MemoryParaphraser(
+                api_base=cfg.api_base,
+                api_key=cfg.api_key,
+                model=cfg.model,
+                temperature=args.paraphrase_temperature,
+                concurrency=args.paraphrase_concurrency,
+                mode=args.candidate_paraphrase,
+                cache_path=paraphrase_cache_path,
+            )
+            log.info(
+                "Paraphrasing %d sampled candidate units with mode=%s; injected memories stay original",
+                total_members + total_nonmembers,
+                args.candidate_paraphrase,
+            )
+            paraphrase_start = time.time()
+            try:
+                attack_user_sets, paraphrase_records = await paraphraser.paraphrase_attack_sets(
+                    user_attack_sets
+                )
+            finally:
+                await paraphraser.close()
+            paraphrase_runtime_seconds = time.time() - paraphrase_start
+            paraphrase_record_count = len(paraphrase_records)
+            paraphrase_audit_path = output_dir / "candidate_paraphrases.json"
+            paraphrase_audit_path.write_text(
+                json.dumps(paraphrase_records, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            log.info(
+                "Candidate paraphrasing completed in %.1fs; audit written to %s",
+                paraphrase_runtime_seconds,
+                paraphrase_audit_path,
+            )
+
         attacker = NaturalAttack(
             cfg,
             rng,
@@ -388,12 +487,16 @@ async def amain():
             target=args.target,
             memory_file=target_memory_file,
             direct_probe_k=args.direct_probe_k,
+            candidate_paraphrase=args.candidate_paraphrase,
         )
+        attacker.paraphrase_runtime_seconds = paraphrase_runtime_seconds
+        attacker.paraphrase_cache_path = paraphrase_cache_path
+        attacker.paraphrase_record_count = paraphrase_record_count
         start = time.time()
         try:
             all_predictions, per_user_predictions = await attacker.attack_all_users(
                 dataset,
-                user_attack_sets,
+                attack_user_sets,
                 run_access,
             )
 
@@ -472,11 +575,24 @@ async def amain():
                     "runtime_seconds": elapsed,
                     "response_scorer": args.response_scorer,
                     "direct_probe_k": args.direct_probe_k,
+                    "candidate_paraphrase": args.candidate_paraphrase,
+                    "candidate_memory_source": (
+                        "semantic paraphrase of sampled attack units"
+                        if args.candidate_paraphrase != "none"
+                        else "original sampled attack units"
+                    ),
+                    "injected_memory_source": "original dataset member memory units",
+                    "candidate_paraphrase_runtime_seconds": paraphrase_runtime_seconds,
+                    "candidate_paraphrase_cache_path": (
+                        str(paraphrase_cache_path) if paraphrase_cache_path else None
+                    ),
+                    "candidate_paraphrase_record_count": paraphrase_record_count,
                     "probe_responses_saved": args.save_probe_responses,
                     "attack_protocol": "run whitebox once, then derive blackbox/graybox/whitebox scores from saved evidence components",
                     "notes": [
                         "member/non-member labels come directly from MemoryDataset splits",
                         "each user's members are injected before testing that user's samples",
+                        "candidate paraphrasing, when enabled, changes only test-time candidate text",
                         "non-members are never injected into agent memory",
                         "the default natural attack does not generate or score decoys",
                         "per_user_metrics shows metrics averaged across users",
