@@ -9,8 +9,8 @@ usage() {
 Run CEA-MI natural attacks with positional arguments.
 
 Usage:
-  ./run_all_natural_attacks.sh [api_port] [dataset] [memory_target] [num_facts]
-  ./run_all_natural_attacks.sh [api_server] [api_port] [dataset] [memory_target] [num_facts]
+  ./run_all_natural_attacks.sh [api_port] [dataset] [memory_target] [num_facts] [memory_backend]
+  ./run_all_natural_attacks.sh [api_server] [api_port] [dataset] [memory_target] [num_facts] [memory_backend]
 
 Positional arguments:
   api_server     Optional vLLM/OpenAI API host, e.g. api-host.example.edu.
@@ -18,6 +18,7 @@ Positional arguments:
   dataset        Dataset name, or all for perltqa -> locomo -> msc. Default: perltqa.
   memory_target  nanobot, mem0, or memgpt. Default: nanobot.
   num_facts      N, none, or auto. Default: auto.
+  memory_backend light, sdk, or full. Default: light. sdk/full is Mem0/Letta SDK.
 
 Dataset-dependent num_facts when num_facts=auto:
   perltqa/test -> 20
@@ -25,11 +26,21 @@ Dataset-dependent num_facts when num_facts=auto:
   msc     -> none
 
 Other settings are controlled by environment variables:
-  CEA_MI_SEED, CEA_MI_CONCURRENCY, CEA_MI_RESPONSE_SCORER,
+  CEA_MI_SEED, CEA_MI_CONCURRENCY, CEA_MI_TARGET_QUERY_CONCURRENCY,
+  CEA_MI_RESPONSE_SCORER,
   CEA_MI_MAX_USERS, CEA_MI_DIRECT_PROBE_K, CEA_MI_SAVE_PROBE_RESPONSES,
+  CEA_MI_CANDIDATE_PARAPHRASE, CEA_MI_PARAPHRASE_TEMPERATURE,
+  CEA_MI_PARAPHRASE_CONCURRENCY, CEA_MI_PARAPHRASE_CACHE,
+  CEA_MI_MEMORY_BACKEND, CEA_MI_MEMORY_STORE_PATH, CEA_MI_MEMGPT_QUERY_MODE,
   CEA_MI_NANOBOT_DB_PATH, CEA_MI_LOG_DIR,
   CEA_MI_RESULTS_DIR, CEA_MI_API_BASE, CEA_MI_API_SERVER/CEA_MI_API_HOST,
   CUDA_VISIBLE_DEVICES.
+
+Note:
+  For memgpt sdk, CEA_MI_MEMGPT_QUERY_MODE defaults to readonly. Set it to
+  agent to use the full Letta agent runtime; in that mode
+  CEA_MI_TARGET_QUERY_CONCURRENCY defaults to 1 because local Letta uses
+  SQLite by default and concurrent message writes can lock the database.
 
 Examples:
   CEA_MI_API_BASE=http://127.0.0.1:8000/v1 ./run_all_natural_attacks.sh perltqa nanobot
@@ -59,6 +70,21 @@ is_target_arg() {
   case "${1,,}" in
     nanobot|mem0|memgpt) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+is_memory_backend_arg() {
+  case "${1,,}" in
+    light|sdk|full) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_memgpt_query_mode() {
+  case "${1,,}" in
+    ""|readonly|read-only|read_only|backend) echo "readonly" ;;
+    agent|runtime|full-agent|full) echo "agent" ;;
+    *) die "CEA_MI_MEMGPT_QUERY_MODE must be readonly or agent" ;;
   esac
 }
 
@@ -113,16 +139,29 @@ DATASET="$(arg_at "$ARG_OFFSET")"
 DATASET="${DATASET:-${CEA_MI_DATASET:-perltqa}}"
 MEMORY_TARGET="$(arg_at "$((ARG_OFFSET + 1))")"
 MEMORY_TARGET="${MEMORY_TARGET:-${CEA_MI_MEMORY_TARGET:-nanobot}}"
-NUM_FACTS="$(arg_at "$((ARG_OFFSET + 2))")"
-NUM_FACTS="${NUM_FACTS:-${CEA_MI_NUM_FACTS:-auto}}"
+NUM_FACTS_OR_BACKEND="$(arg_at "$((ARG_OFFSET + 2))")"
+MEMORY_BACKEND="$(arg_at "$((ARG_OFFSET + 3))")"
+if [[ -n "$NUM_FACTS_OR_BACKEND" && -z "$MEMORY_BACKEND" ]] && is_memory_backend_arg "$NUM_FACTS_OR_BACKEND"; then
+  NUM_FACTS="${CEA_MI_NUM_FACTS:-auto}"
+  MEMORY_BACKEND="$NUM_FACTS_OR_BACKEND"
+else
+  NUM_FACTS="${NUM_FACTS_OR_BACKEND:-${CEA_MI_NUM_FACTS:-auto}}"
+fi
+MEMORY_BACKEND="${MEMORY_BACKEND:-${CEA_MI_MEMORY_BACKEND:-light}}"
 
 SEED="${CEA_MI_SEED:-42}"
 CONCURRENCY="${CEA_MI_CONCURRENCY:-40}"
+TARGET_QUERY_CONCURRENCY="${CEA_MI_TARGET_QUERY_CONCURRENCY:-}"
 RESPONSE_SCORER="${CEA_MI_RESPONSE_SCORER:-llm}"
 DIRECT_PROBE_K="${CEA_MI_DIRECT_PROBE_K:-5}"
+CANDIDATE_PARAPHRASE="${CEA_MI_CANDIDATE_PARAPHRASE:-none}"
+PARAPHRASE_TEMPERATURE="${CEA_MI_PARAPHRASE_TEMPERATURE:-0.3}"
+PARAPHRASE_CONCURRENCY="${CEA_MI_PARAPHRASE_CONCURRENCY:-20}"
+PARAPHRASE_CACHE="${CEA_MI_PARAPHRASE_CACHE:-}"
 SAVE_PROBE_RESPONSES="${CEA_MI_SAVE_PROBE_RESPONSES:-0}"
 MAX_USERS="${CEA_MI_MAX_USERS:-}"
 DB_PATH="${CEA_MI_NANOBOT_DB_PATH:-}"
+MEMORY_STORE_PATH="${CEA_MI_MEMORY_STORE_PATH:-}"
 LOG_DIR="${CEA_MI_LOG_DIR:-logs}"
 RESULTS_DIR="${CEA_MI_RESULTS_DIR:-results}"
 API_BASE="${CEA_MI_API_BASE:-}"
@@ -133,6 +172,14 @@ normalize_target() {
   case "${1,,}" in
     nanobot|mem0|memgpt) echo "${1,,}" ;;
     *) die "memory_target must be nanobot, mem0, or memgpt" ;;
+  esac
+}
+
+normalize_memory_backend() {
+  case "${1,,}" in
+    light) echo "light" ;;
+    sdk|full) echo "sdk" ;;
+    *) die "memory_backend must be light, sdk, or full" ;;
   esac
 }
 
@@ -209,8 +256,19 @@ compose_api_base() {
 }
 
 MEMORY_TARGET="$(normalize_target "$MEMORY_TARGET")"
+MEMORY_BACKEND="$(normalize_memory_backend "$MEMORY_BACKEND")"
 DATASET_LIST="$(normalize_datasets "$DATASET")"
 REQUESTED_NUM_FACTS="$NUM_FACTS"
+MEMGPT_QUERY_MODE=""
+
+if [[ "$MEMORY_TARGET" == "memgpt" && "$MEMORY_BACKEND" == "sdk" ]]; then
+  MEMGPT_QUERY_MODE="$(normalize_memgpt_query_mode "${CEA_MI_MEMGPT_QUERY_MODE:-readonly}")"
+  export CEA_MI_MEMGPT_QUERY_MODE="$MEMGPT_QUERY_MODE"
+fi
+
+if [[ -z "${CEA_MI_TARGET_QUERY_CONCURRENCY:-}" && "$MEMORY_TARGET" == "memgpt" && "$MEMORY_BACKEND" == "sdk" && "$MEMGPT_QUERY_MODE" == "agent" ]]; then
+  TARGET_QUERY_CONCURRENCY=1
+fi
 
 if [[ -n "$API_SERVER" ]]; then
   API_BASE="$(compose_api_base "$API_SERVER" "$API_PORT")"
@@ -224,6 +282,25 @@ fi
 
 if [[ -n "$API_BASE" ]]; then
   export CEA_MI_API_BASE="$API_BASE"
+fi
+
+if [[ "$MEMORY_TARGET" == "memgpt" && "$MEMORY_BACKEND" == "sdk" ]]; then
+  EMBEDDING_ENDPOINT="${CEA_MI_LETTA_EMBEDDING_ENDPOINT:-http://127.0.0.1:${CEA_MI_EMBEDDING_PORT:-8290}}"
+  if [[ "$EMBEDDING_ENDPOINT" =~ ^http://(127\.0\.0\.1|localhost):([0-9]+)$ ]]; then
+    if ! python - "$EMBEDDING_ENDPOINT" <<'PY' >/dev/null 2>&1
+import sys
+from urllib.request import urlopen
+
+endpoint = sys.argv[1].rstrip("/")
+with urlopen(f"{endpoint}/health", timeout=2) as response:
+    if response.status < 500:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      die "memgpt sdk requires local embedding server at ${EMBEDDING_ENDPOINT}; start it with ./memgpt_target/start_embedding_server.sh ${API_SERVER:-$(hostname -s)} ${CEA_MI_EMBEDDING_PORT:-8290}"
+    fi
+  fi
 fi
 
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -242,6 +319,10 @@ fi
 echo "=== CEA-MI natural attack runner ==="
 echo "API server:      ${API_SERVER:-<from CEA_MI_API_BASE>}"
 echo "Target:          $MEMORY_TARGET"
+echo "Memory backend:  $MEMORY_BACKEND"
+if [[ -n "$MEMGPT_QUERY_MODE" ]]; then
+  echo "MemGPT query:    $MEMGPT_QUERY_MODE"
+fi
 echo "Dataset request: $DATASET"
 echo "Dataset sequence: $DATASET_LIST"
 echo "Num facts request: $REQUESTED_NUM_FACTS"
@@ -250,9 +331,12 @@ echo "API base:        ${CEA_MI_API_BASE:-<required: CEA_MI_API_BASE or api_serv
 echo "CUDA devices:    ${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "Seed:            $SEED"
 echo "Concurrency:     $CONCURRENCY"
+echo "Target queries:  ${TARGET_QUERY_CONCURRENCY:-<unlimited>}"
 echo "Direct probe k:  $DIRECT_PROBE_K"
 echo "Scorer:          $RESPONSE_SCORER"
+echo "Candidate para:  $CANDIDATE_PARAPHRASE"
 echo "Results dir:     $RESULTS_DIR"
+echo "Memory store:    ${MEMORY_STORE_PATH:-<auto>}"
 echo "Log dir:         $LOG_DIR"
 echo
 
@@ -272,6 +356,10 @@ for DATASET_ITEM in $DATASET_LIST; do
     --concurrency "$CONCURRENCY"
     --direct-probe-k "$DIRECT_PROBE_K"
     --response-scorer "$RESPONSE_SCORER"
+    --memory-backend "$MEMORY_BACKEND"
+    --candidate-paraphrase "$CANDIDATE_PARAPHRASE"
+    --paraphrase-temperature "$PARAPHRASE_TEMPERATURE"
+    --paraphrase-concurrency "$PARAPHRASE_CONCURRENCY"
     --output-path "$RESULTS_DIR"
   )
 
@@ -279,9 +367,21 @@ for DATASET_ITEM in $DATASET_LIST; do
     COMMON_ARGS+=(--max-users "$MAX_USERS")
   fi
 
+  if [[ -n "$TARGET_QUERY_CONCURRENCY" ]]; then
+    COMMON_ARGS+=(--target-query-concurrency "$TARGET_QUERY_CONCURRENCY")
+  fi
+
   case "${SAVE_PROBE_RESPONSES,,}" in
     1|true|yes|y|on) COMMON_ARGS+=(--save-probe-responses) ;;
   esac
+
+  if [[ -n "$PARAPHRASE_CACHE" ]]; then
+    COMMON_ARGS+=(--paraphrase-cache "$PARAPHRASE_CACHE")
+  fi
+
+  if [[ -n "$MEMORY_STORE_PATH" ]]; then
+    COMMON_ARGS+=(--memory-store-path "$MEMORY_STORE_PATH")
+  fi
 
   if [[ "$MEMORY_TARGET" == "nanobot" && -n "$DB_PATH" ]]; then
     COMMON_ARGS+=(--db "$DB_PATH")
@@ -289,12 +389,21 @@ for DATASET_ITEM in $DATASET_LIST; do
     echo "Note: CEA_MI_NANOBOT_DB_PATH is ignored for ${MEMORY_TARGET}." >&2
   fi
 
-  OUTPUT_NAME="${DATASET_LABEL}_${MEMORY_TARGET}_${RESPONSE_SCORER}_k${DIRECT_PROBE_K}_seed${SEED}"
+  PARAPHRASE_SUFFIX=""
+  if [[ "$CANDIDATE_PARAPHRASE" != "none" ]]; then
+    PARAPHRASE_SUFFIX="_candidate-${CANDIDATE_PARAPHRASE}"
+  fi
+  BACKEND_SUFFIX=""
+  if [[ "$MEMORY_TARGET" != "nanobot" && "$MEMORY_BACKEND" != "light" ]]; then
+    BACKEND_SUFFIX="_${MEMORY_BACKEND}"
+  fi
+  OUTPUT_NAME="${DATASET_LABEL}_${MEMORY_TARGET}_${RESPONSE_SCORER}${BACKEND_SUFFIX}_k${DIRECT_PROBE_K}${PARAPHRASE_SUFFIX}_seed${SEED}"
   OUTPUT_PATH="$RESULTS_DIR/$OUTPUT_NAME"
   LOG_PATH="$LOG_DIR/${OUTPUT_NAME}${PORT_LABEL}.log"
 
   echo "=== Starting dataset=${DATASET_ITEM} ${MEMORY_TARGET} natural attack ==="
   echo "Num facts: ${NUM_FACTS_FOR_DATASET}"
+  echo "Backend:   ${MEMORY_BACKEND}"
   echo "Output:    ${OUTPUT_PATH}"
   echo "Log:       ${LOG_PATH}"
 

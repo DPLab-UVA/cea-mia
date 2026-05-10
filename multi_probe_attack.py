@@ -49,6 +49,7 @@ class MultiProbeDirectAttack:
         model: str = DEFAULT_MODEL,
         temperature: float = 0.7,
         probe_concurrency: int = 40,
+        target_query_concurrency: Optional[int] = None,
         response_scorer: str = "rules",
         direct_probe_k: int = 5,
         memory_statement_judge: bool = False,
@@ -58,6 +59,16 @@ class MultiProbeDirectAttack:
         self.model = model
         self.temperature = temperature
         self.probe_concurrency = max(1, probe_concurrency)
+        self.target_query_concurrency = (
+            max(1, int(target_query_concurrency))
+            if target_query_concurrency is not None
+            else None
+        )
+        self.target_query_semaphore = (
+            asyncio.Semaphore(self.target_query_concurrency)
+            if self.target_query_concurrency
+            else None
+        )
         self.response_scorer = response_scorer
         self.direct_probe_k = max(1, int(direct_probe_k))
         self.memory_statement_judge = memory_statement_judge
@@ -98,7 +109,11 @@ class MultiProbeDirectAttack:
         access_level: str,
         target: str,
     ) -> ProbeResult:
-        resp = await query_agent(agent, probe.question, access_level, target)
+        if self.target_query_semaphore is None:
+            resp = await query_agent(agent, probe.question, access_level, target)
+        else:
+            async with self.target_query_semaphore:
+                resp = await query_agent(agent, probe.question, access_level, target)
         memory_metadata = None
         if access_level == "whitebox":
             memory_metadata = {

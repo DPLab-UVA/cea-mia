@@ -59,7 +59,13 @@ from multi_probe_attack import MultiProbeDirectAttack
 from evaluation import Evaluator
 from experiment_db import create_empty_memory_db, cleanup_isolated_db
 from probe_generator import ProbeGenerator
-from memory_unit import MemoryUnit
+from memory_unit import MemoryUnit, UserMemorySet
+from target_adapters import (
+    MEMORY_BACKEND_CHOICES,
+    load_target_agent as load_target_adapter,
+    normalize_memgpt_query_mode,
+    normalize_memory_backend,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("baselines")
@@ -243,37 +249,32 @@ class BroadSubjectQuestionGenerator:
 
 # ── Target agent loaders ─────────────────────────────────────────────────
 
-def load_target_agent(target: str, memory_file: str, cfg: Config, db_path: Optional[Path] = None):
+def load_target_agent(
+    target: str,
+    memory_file: Optional[str],
+    cfg: Config,
+    db_path: Optional[Path] = None,
+    memory_backend: str = "light",
+    memory_store_path: Optional[Path] = None,
+):
     """Load the appropriate agent based on target type.
 
     Args:
         target: Target type (nanobot, memgpt, mem0)
-        memory_file: Memory file path for memgpt/mem0
+        memory_file: Memory file path for memgpt/mem0 light backend
         cfg: Configuration object
         db_path: Optional override for nanobot database path (for parallel execution)
+        memory_backend: light for local JSON+embedding, sdk/full for full SDK path
+        memory_store_path: Optional local SDK memory store path
     """
-    if target == "memgpt":
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "memgpt_target"))
-        from setup_memgpt import EmbeddingMemoryAgent
-        return EmbeddingMemoryAgent(db_path=memory_file,
-                                    vllm_base=cfg.api_base, vllm_model=cfg.model,
-                                    vllm_api_key=cfg.api_key)
-    elif target == "mem0":
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mem0_target"))
-        from setup_mem0 import Mem0Agent
-        return Mem0Agent(db_path=memory_file,
-                         vllm_base=cfg.api_base, vllm_model=cfg.model,
-                         vllm_api_key=cfg.api_key)
-    elif target == "nanobot":
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from agent_interface import AgentInterface
-        actual_db_path = db_path if db_path else cfg.nanobot_db_path
-        return AgentInterface(api_base=cfg.api_base, api_key=cfg.api_key,
-                              model=cfg.model, db_path=actual_db_path,
-                              temperature=cfg.temperature,
-                              max_tokens=cfg.max_tokens)
-    else:
-        raise ValueError(f"Unknown target: {target}")
+    return load_target_adapter(
+        target,
+        cfg,
+        db_path=db_path,
+        memory_file=Path(memory_file) if memory_file else None,
+        memory_backend=memory_backend,
+        memory_store_path=memory_store_path,
+    )
 
 
 def resolve_dataset_path(dataset_arg: str, cfg: Config) -> Path:
@@ -349,6 +350,16 @@ def load_user_fact_sets(
 
 def prepare_agent_for_user(agent, target: str, user_fact_set: UserFactSet):
     """Reset target memory and inject this user's member memories."""
+    if hasattr(agent, "prepare_user_memory"):
+        agent.prepare_user_memory(
+            UserMemorySet(
+                user_id=user_fact_set.user_id,
+                members=list(user_fact_set.member_units),
+                non_members=[],
+            )
+        )
+        return
+
     if target == "nanobot":
         agent.clear_all_memory()
         for unit in user_fact_set.member_units:
@@ -1756,7 +1767,18 @@ async def amain():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dataset", default="perltqa")
-    parser.add_argument("--memory-file", default=None)
+    parser.add_argument("--memory-file", default=None, help="Light-backend JSON memory file for mem0/memgpt")
+    parser.add_argument(
+        "--memory-backend",
+        choices=MEMORY_BACKEND_CHOICES,
+        default="light",
+        help="Memory backend for mem0/memgpt: light uses JSON+embedding; sdk/full uses full Mem0 or Letta SDK",
+    )
+    parser.add_argument(
+        "--memory-store-path",
+        default=None,
+        help="Local SDK memory store path. For mem0 sdk this is the Qdrant path; for memgpt sdk it labels temporary Letta agents.",
+    )
     parser.add_argument("--db", default=None)
     parser.add_argument("--max-users", type=int, default=None)
     parser.add_argument("--output-path", default=None, help="Manually set the result output directory")
@@ -1793,16 +1815,35 @@ async def amain():
     except ValueError as exc:
         parser.error(str(exc))
     cfg.seed = args.seed
+    args.memory_backend = normalize_memory_backend(args.memory_backend)
+    memgpt_query_mode = (
+        normalize_memgpt_query_mode(os.environ.get("CEA_MI_MEMGPT_QUERY_MODE"))
+        if args.target == "memgpt" and args.memory_backend == "sdk"
+        else None
+    )
+    if memgpt_query_mode:
+        os.environ.setdefault("CEA_MI_MEMGPT_QUERY_MODE", memgpt_query_mode)
 
     # Default memory files per target
-    if args.memory_file is None:
+    if args.memory_file is None and args.memory_backend == "light":
         if args.target == "memgpt":
             args.memory_file = "memgpt_memories.json"
         elif args.target == "mem0":
             args.memory_file = "mem0_memories.json"
+    if args.target == "nanobot" and args.memory_backend != "light":
+        log.warning("--memory-backend=%s is ignored for nanobot target", args.memory_backend)
+    if args.target != "nanobot" and args.memory_backend == "sdk" and args.memory_file:
+        log.warning("--memory-file is ignored when --memory-backend=sdk")
 
     if args.db:
         cfg.nanobot_db_path = Path(args.db)
+
+    log.info(
+        "Target=%s memory_backend=%s memory_query_mode=%s",
+        args.target,
+        args.memory_backend if args.target != "nanobot" else "native",
+        memgpt_query_mode or "<none>",
+    )
 
     # Load per-user facts from MemoryDataset
     dataset_path = resolve_dataset_path(args.dataset, cfg)
@@ -1832,6 +1873,7 @@ async def amain():
         output_accesses = BASELINE_OUTPUT_ACCESSES[bname]
         isolated_db = None
         agent = None
+        memory_store_path = None
 
         try:
             # Create isolated DB for this baseline (enables parallel execution)
@@ -1845,7 +1887,27 @@ async def amain():
                 log.info("Created isolated DB for %s: %s", bname, isolated_db)
                 agent = load_target_agent(args.target, args.memory_file, cfg, db_path=isolated_db)
             else:
-                agent = load_target_agent(args.target, args.memory_file, cfg)
+                if args.memory_backend == "sdk":
+                    memory_store_path = (
+                        Path(args.memory_store_path).expanduser()
+                        if args.memory_store_path
+                        else Path(cfg.output_dir)
+                        / f"{dataset_label}_{args.target}_baseline_{bname}_sdk_store_seed{args.seed}"
+                    )
+                    memory_store_path.parent.mkdir(parents=True, exist_ok=True)
+                    log.info(
+                        "Using %s SDK memory store path for %s: %s",
+                        args.target,
+                        bname,
+                        memory_store_path,
+                    )
+                agent = load_target_agent(
+                    args.target,
+                    args.memory_file,
+                    cfg,
+                    memory_backend=args.memory_backend,
+                    memory_store_path=memory_store_path,
+                )
 
             predictions, per_user_predictions, elapsed = await run_baseline_per_user(
                 bname,
@@ -1866,14 +1928,23 @@ async def amain():
                     log.warning("Could not close target agent for %s: %s", bname, exc)
             if args.target == "nanobot" and isolated_db and cleanup_isolated_db(isolated_db):
                 log.info("Cleaned up isolated DB: %s", isolated_db)
-            if args.target != "nanobot":
+            if args.target != "nanobot" and args.memory_backend == "light":
                 cleanup_generated_working_memory_file(args.memory_file)
 
         # Save results
         scorer_suffix = f"_{args.response_scorer}" if bname in SCORER_BASELINES else ""
         probe_suffix = f"_k{args.direct_probe_k}" if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"} else ""
+        backend_suffix = (
+            ""
+            if args.target == "nanobot" or args.memory_backend == "light"
+            else (
+                f"_{args.memory_backend}-{memgpt_query_mode}"
+                if memgpt_query_mode
+                else f"_{args.memory_backend}"
+            )
+        )
         default_dir_name = (
-            f"{dataset_label}_{args.target}"
+            f"{dataset_label}_{args.target}{backend_suffix}"
             f"_baseline_{bname}{scorer_suffix}{probe_suffix}_seed{args.seed}"
         )
         if args.output_path:
@@ -1907,6 +1978,9 @@ async def amain():
             report["run_access_level"] = run_access
             report["output_access_level"] = output_access
             report["derived_from_access"] = run_access
+            report["memory_backend"] = args.memory_backend if args.target != "nanobot" else "native"
+            report["memory_query_mode"] = memgpt_query_mode
+            report["memory_store_path"] = str(memory_store_path) if memory_store_path else None
             report["probe_responses_saved"] = bool(args.save_probe_responses)
             report["runtime_seconds"] = float(elapsed)
             report["runtime_scope"] = "baseline execution through prediction generation; excludes metrics/report serialization"
@@ -1998,6 +2072,8 @@ async def amain():
                 "seed": args.seed,
                 "response_scorer": args.response_scorer,
                 "direct_probe_k": args.direct_probe_k,
+                "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                "memory_query_mode": memgpt_query_mode,
                 "results": {bname: result_summary},
             }
             with open(output_dir / "comparison.json", "w", encoding="utf-8") as f:
@@ -2024,10 +2100,19 @@ async def amain():
     for output_access, access_results in all_results_by_access.items():
         if not access_results:
             continue
+        combined_backend_suffix = (
+            ""
+            if args.target == "nanobot" or args.memory_backend == "light"
+            else (
+                f"_{args.memory_backend}-{memgpt_query_mode}"
+                if memgpt_query_mode
+                else f"_{args.memory_backend}"
+            )
+        )
         combined_dir = (
             Path(args.output_path) / "comparison" / output_access
             if args.output_path and multiple_baselines
-            else Path(cfg.output_dir) / f"{dataset_label}_{args.target}_{output_access}_baselines_seed{args.seed}"
+            else Path(cfg.output_dir) / f"{dataset_label}_{args.target}{combined_backend_suffix}_{output_access}_baselines_seed{args.seed}"
         )
         if args.output_path and not multiple_baselines:
             continue
@@ -2039,6 +2124,8 @@ async def amain():
                         "seed": args.seed,
                         "response_scorer": args.response_scorer,
                         "direct_probe_k": args.direct_probe_k,
+                        "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                        "memory_query_mode": memgpt_query_mode,
                         "results": access_results}, f, indent=2)
 
 

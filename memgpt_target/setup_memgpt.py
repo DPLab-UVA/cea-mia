@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -44,49 +45,168 @@ def _require_llm_config(vllm_base: str | None, vllm_model: str | None, context: 
     if missing:
         raise ValueError(f"{context} requires {', '.join(missing)}")
 
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
+def _prepare_letta_env() -> None:
+    base_dir = Path(os.environ.get("LETTA_LETTA_DIR") or os.environ.get("LETTA_DIR") or REPO_ROOT / "results" / "letta_home_client")
+    home_dir = Path(os.environ.get("LETTA_HOME") or base_dir)
+    composio_dir = Path(os.environ.get("COMPOSIO_CACHE_DIR") or base_dir.parent / f"{base_dir.name}_composio")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    home_dir.mkdir(parents=True, exist_ok=True)
+    composio_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(home_dir)
+    os.environ.setdefault("LETTA_HOME", str(home_dir))
+    os.environ.setdefault("LETTA_DIR", str(base_dir))
+    os.environ.setdefault("LETTA_LETTA_DIR", str(base_dir))
+    os.environ.setdefault("COMPOSIO_CACHE_DIR", str(composio_dir))
+    os.environ.setdefault("OPENLLM_AUTH_TYPE", "bearer_token")
+    os.environ.setdefault("OPENLLM_API_KEY", os.environ.get("CEA_MI_API_KEY", "token-vllm"))
+
+
+def _letta_base_url() -> str:
+    return (
+        os.environ.get("LETTA_BASE_URL")
+        or os.environ.get("LETTA_SERVER_URL")
+        or f"http://127.0.0.1:{os.environ.get('LETTA_PORT', '8283')}"
+    )
+
+
+def _create_letta_client():
+    try:
+        from letta_client import Letta
+    except ModuleNotFoundError:
+        pass
+    else:
+        return Letta(base_url=_letta_base_url()), "letta_client"
+
+    _prepare_letta_env()
+    try:
+        from letta import RESTClient, create_client
+    except ImportError:
+        from letta import RESTClient
+
+        return RESTClient(base_url=_letta_base_url()), "rest_client"
+
+    return create_client(), "create_client"
+
+
+def _object_id(obj: object) -> str:
+    if isinstance(obj, dict):
+        value = obj.get("id")
+    else:
+        value = getattr(obj, "id", None)
+    if not value:
+        raise RuntimeError("Letta returned an agent without an id")
+    return str(value)
+
+
+def _object_name(obj: object) -> str | None:
+    if isinstance(obj, dict):
+        return obj.get("name")
+    return getattr(obj, "name", None)
+
+
+def _embedding_config(client_mode: str):
+    endpoint_type = os.environ.get("CEA_MI_LETTA_EMBEDDING_ENDPOINT_TYPE", "hugging-face")
+    endpoint = os.environ.get("CEA_MI_LETTA_EMBEDDING_ENDPOINT")
+    if endpoint is None and endpoint_type == "hugging-face":
+        endpoint = f"http://127.0.0.1:{os.environ.get('CEA_MI_EMBEDDING_PORT', '8290')}"
+    kwargs = {
+        "embedding_endpoint_type": endpoint_type,
+        "embedding_endpoint": endpoint,
+        "embedding_model": os.environ.get("CEA_MI_LETTA_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
+        "embedding_dim": _env_int("CEA_MI_LETTA_EMBEDDING_DIM", 384),
+        "embedding_chunk_size": _env_int("CEA_MI_LETTA_EMBEDDING_CHUNK_SIZE", 300),
+    }
+    if client_mode == "letta_client":
+        from letta_client.types.embedding_config import EmbeddingConfig
+    else:
+        from letta.schemas.embedding_config import EmbeddingConfig
+    return EmbeddingConfig(**kwargs)
+
+
+def _llm_config(client_mode: str, vllm_base: str, vllm_model: str):
+    kwargs = {
+        "model_endpoint_type": "vllm",
+        "model_endpoint": vllm_base,
+        "model": vllm_model,
+        "context_window": _env_int("CEA_MI_LETTA_CONTEXT_WINDOW", 8192),
+        "max_tokens": _env_int("CEA_MI_LETTA_MAX_TOKENS", 2048),
+    }
+    if client_mode == "letta_client":
+        from letta_client.types.llm_config import LlmConfig
+
+        return LlmConfig(**kwargs)
+
+    from letta.schemas.llm_config import LLMConfig
+
+    return LLMConfig(**kwargs)
+
 # ── Agent setup using Letta SDK ──────────────────────────────────────────
 
 def create_agent(vllm_base: str | None = None, vllm_model: str | None = None):
     """Create a Letta agent with archival (embedding-based) memory."""
-    from letta import create_client
-
     vllm_base = vllm_base or DEFAULT_API_BASE
     vllm_model = vllm_model or DEFAULT_MODEL
     _require_llm_config(vllm_base, vllm_model, "Letta agent setup")
 
-    client = create_client()
+    client, client_mode = _create_letta_client()
+    system = (
+        "You are a helpful AI assistant with persistent memory. "
+        "You remember facts about the user across conversations. "
+        "When the user tells you something personal, store it in your archival memory. "
+        "When asked about the user, search your archival memory for relevant information."
+    )
 
     # Create agent with archival memory enabled
-    agent_state = client.create_agent(
-        name="cea_mi_target",
-        system=(
-            "You are a helpful AI assistant with persistent memory. "
-            "You remember facts about the user across conversations. "
-            "When the user tells you something personal, store it in your archival memory. "
-            "When asked about the user, search your archival memory for relevant information."
-        ),
-        embedding_config={
-            "embedding_endpoint_type": "local",
-            "embedding_model": "BAAI/bge-small-en-v1.5",
-            "embedding_dim": 384,
-        },
-        llm_config={
-            "model_endpoint_type": "vllm",
-            "model_endpoint": vllm_base,
-            "model": vllm_model,
-        },
-    )
-    print(f"Created agent: {agent_state.id}")
+    if client_mode == "letta_client":
+        from letta_client.types.create_block import CreateBlock
+
+        agent_state = client.agents.create(
+            name="cea_mi_target",
+            system=system,
+            embedding_config=_embedding_config(client_mode),
+            llm_config=_llm_config(client_mode, vllm_base, vllm_model),
+            memory_blocks=[
+                CreateBlock(label="human", value="The human is participating in a memory benchmark.", limit=5000),
+                CreateBlock(label="persona", value="I am a helpful memory assistant.", limit=5000),
+            ],
+            include_base_tools=True,
+            message_buffer_autoclear=True,
+        )
+    else:
+        from letta.schemas.memory import ChatMemory
+
+        agent_state = client.create_agent(
+            name="cea_mi_target",
+            system=system,
+            embedding_config=_embedding_config(client_mode),
+            llm_config=_llm_config(client_mode, vllm_base, vllm_model),
+            memory=ChatMemory(
+                human="The human is participating in a memory benchmark.",
+                persona="I am a helpful memory assistant.",
+            ),
+            include_base_tools=True,
+            message_buffer_autoclear=True,
+        )
+    print(f"Created agent: {_object_id(agent_state)}")
     return client, agent_state
 
 
 def ingest_facts(dataset_path: str, num_facts: int = None):
     """Ingest benchmark facts into the Letta agent's archival memory."""
-    from letta import create_client
-
-    client = create_client()
-    agents = client.list_agents()
-    agent = next((a for a in agents if a.name == "cea_mi_target"), None)
+    client, client_mode = _create_letta_client()
+    agents = client.agents.list(name="cea_mi_target", limit=50) if client_mode == "letta_client" else client.list_agents()
+    agent = next((a for a in agents if _object_name(a) == "cea_mi_target"), None)
     if not agent:
         print("Agent 'cea_mi_target' not found. Run 'setup' first.")
         sys.exit(1)
@@ -106,11 +226,20 @@ def ingest_facts(dataset_path: str, num_facts: int = None):
             continue
 
         # Send as conversation message — the agent will decide what to memorize
-        response = client.send_message(
-            agent_id=agent.id,
-            role="user",
-            message=user_msg,
-        )
+        if client_mode == "letta_client":
+            from letta_client.types.message_create import MessageCreate
+
+            response = client.agents.messages.create(
+                _object_id(agent),
+                messages=[MessageCreate(role="user", content=user_msg)],
+                max_steps=10,
+            )
+        else:
+            response = client.send_message(
+                agent_id=_object_id(agent),
+                role="user",
+                message=user_msg,
+            )
         ingested += 1
 
         if ingested % 50 == 0:
@@ -120,15 +249,31 @@ def ingest_facts(dataset_path: str, num_facts: int = None):
     print(f"Done. Ingested {ingested} turns.")
 
     # Check archival memory stats
-    memories = client.get_archival_memory(agent_id=agent.id, limit=10000)
+    if client_mode == "letta_client":
+        memories = client.agents.passages.list(_object_id(agent), limit=10000)
+    else:
+        memories = client.get_archival_memory(agent_id=_object_id(agent), limit=10000)
     print(f"Archival memories: {len(memories)}")
 
 
 def serve():
     """Start the Letta server."""
+    _prepare_letta_env()
+    host = os.environ.get("LETTA_HOST", "0.0.0.0")
+    port = int(os.environ.get("LETTA_PORT", "8283"))
+
+    import importlib.util
+
+    if importlib.util.find_spec("letta.server.rest_api.app") is not None:
+        from letta.server.rest_api.app import start_server
+
+        start_server(host=host, port=port)
+        return
+
     from letta.server.server import app
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8283)
+
+    uvicorn.run(app, host=host, port=port)
 
 
 # ── Minimal embedding-based agent (no Letta dependency) ─────────────────
