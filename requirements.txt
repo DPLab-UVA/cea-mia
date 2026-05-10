@@ -18,6 +18,16 @@ transformers>=4.41,<5
 huggingface-hub>=0.23,<1
 tokenizers>=0.19,<0.21
 
+# Full MemGPT/Letta SDK backend. Letta 0.9.1 keeps Python 3.10 compatibility;
+# the server path also imports the cloud tool sandbox package at startup.
+letta==0.9.1
+letta-client==0.1.236
+e2b-code-interpreter>=1.0.3,<2.0.0
+fastapi>=0.115.6
+uvicorn>=0.24.0
+mem0ai
+sqlite-vec 
+
 # Optional but useful when the embedding stack needs dataset utilities. This is
 # compatible with huggingface-hub <1 and avoids the old HfFolder import issue.
 datasets>=2.19,<3

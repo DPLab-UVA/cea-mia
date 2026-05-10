@@ -122,11 +122,10 @@ RECALLED MEMORY:
 {memory_content}
 
 Important rules:
-- **Question leakage**: The QUESTION is context only. A value mentioned only in the QUESTION is not
-  evidence.
-- **Stored text**: Treat the recalled memory as stored memory text, not as an assistant answer.
-- **Contradiction is zero**: Treat explicit contradiction of the candidate statement as 0.0.
-- **Wrong value is zero**: If the recalled memory supports a different value on the same topic, score 0.0 even if it is plausible or related.
+- Treat the recalled memory as stored text. The QUESTION is context only, not evidence.
+- Score only facts explicitly stated in the recalled memory. Do not infer or count topical similarity.
+- Require the same subject and the same topic/key value. Different, missing, broader, or ambiguous values score 0.0.
+- Give 1.0 only for exact direct support of the candidate; merely related, inferred, contradicted, or wrong-subject memories score 0.0.
 - **Fixed scale**: Use only these four scores: 1.0, 0.67, 0.33, 0.0.
 
 Scoring rubric:
@@ -194,17 +193,17 @@ RECALLED MEMORY:
 {memory_content}
 
 Important rules:
-- **Stored text**: Treat the recalled memory as stored memory text, not as an assistant answer.
-- **Contradiction is zero**: Treat explicit contradiction of the candidate statement as 0.0.
-- **Specific support matters**: Broadly related memories are not enough unless they support the specific statement.
-- **Question leakage is not evidence**: Do not give credit for facts that appear only in the question.
+- Treat the recalled memory as stored text. The QUESTION is context only, not evidence.
+- Score only facts explicitly stated in the recalled memory. Do not infer or count topical similarity.
+- Require the same subject and the same attribute/value as the candidate. Different, missing, broader, or ambiguous facts score 0.0.
+- Give 1.0 only when all critical candidate details are directly stated; merely related, inferred, contradicted, or wrong-subject memories score 0.0.
 - **Fixed scale**: Use only these four scores: 1.0, 0.67, 0.33, 0.0.
 
 Scoring rubric:
-- 1.0 full_match: The recalled memory clearly supports the candidate statement with the same specific details.
-- 0.67 near_match: The recalled memory supports the same statement with a true synonym, paraphrase, or minor missing non-critical detail.
-- 0.33 partial_match: The recalled memory gives a weak but specific clue toward the candidate statement.
-- 0.0 no_match: The memory is absent, merely related, contradicted, only repeats question content, or supports a different statement.
+- 1.0 exact_direct_match: The recalled memory directly states the same subject, the same attribute or relation, the same value, and all critical details of the candidate statement.
+- 0.67 direct_near_match: The recalled memory directly states the same subject and core value, but uses a true synonym.
+- 0.33 direct_fragment: The recalled memory directly states a narrow fragment about the same subject, but it is missing a critical detail needed to support the full candidate statement.
+- 0.0 no_match: The recalled memory is absent, merely related, inferred, ambiguous, contradicted, about the wrong subject, or states the wrong value.
 
 Return ONLY valid JSON in this exact shape:
 {{
@@ -220,10 +219,10 @@ RECALL_RUBRIC = """\
 - 0.0 no_match: The key value is absent or wrong, merely present in the question, contradicted, replaced by another value, supported only by unrelated/broad/compatible information, or the response is unknown/refusal/no information."""
 
 MEMORY_SUPPORT_RUBRIC = """\
-- 1.0 full_match: The recalled memory directly supports the same specific key value and candidate statement.
-- 0.67 near_match: The recalled memory supports the same key value with a true synonym, paraphrase, or minor missing non-critical detail.
-- 0.33 partial_match: The recalled memory gives a weak but specific clue toward the key value or candidate statement, but it is incomplete or requires inference.
-- 0.0 no_match: The recalled memory is absent, merely related, contradicted, only repeats question content, supports a different value, or is only broadly compatible."""
+- 1.0 exact_direct_match: The recalled memory directly states the same subject, the same topic or attribute, the same key value, and all critical details of the candidate statement.
+- 0.67 direct_near_match: The recalled memory directly states the same subject and key value, but uses a true synonym or omits only a non-critical detail.
+- 0.33 direct_fragment: The recalled memory directly states a narrow fragment about the same subject and topic, but it is missing a critical detail needed to support the full candidate statement or key-value claim.
+- 0.0 no_match: The recalled memory is absent, merely related, inferred, ambiguous, contradicted, about the wrong subject, or states the wrong value."""
 
 PROVENANCE_RUBRIC = """\
 - 1.0 full_match: The response explicitly supports the same specific key value and gives a clear memory/source basis, such as "you told me", "you mentioned", "I remember", or similar.

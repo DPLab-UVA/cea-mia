@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import time
 from pathlib import Path
@@ -32,7 +33,13 @@ from memory_paraphraser import MemoryParaphraser
 from memory_unit import MemoryDataset
 from models import AccessLevel, MembershipPrediction
 from multi_probe_attack import MultiProbeDirectAttack
-from target_adapters import TARGET_CHOICES, load_target_agent
+from target_adapters import (
+    MEMORY_BACKEND_CHOICES,
+    TARGET_CHOICES,
+    load_target_agent,
+    normalize_memgpt_query_mode,
+    normalize_memory_backend,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("natural_attack")
@@ -46,18 +53,29 @@ class NaturalAttack:
         cfg: Config,
         rng: random.Random,
         concurrency: int = 40,
+        target_query_concurrency: Optional[int] = None,
         response_scorer: str = "rules",
         target: str = "nanobot",
         memory_file: Optional[Path] = None,
+        memory_backend: str = "light",
+        memory_store_path: Optional[Path] = None,
         direct_probe_k: int = 5,
         candidate_paraphrase: str = "none",
     ):
         self.cfg = cfg
         self.rng = rng
         self.concurrency = concurrency
+        self.target_query_concurrency = target_query_concurrency
         self.response_scorer = response_scorer
         self.target = target
         self.memory_file = Path(memory_file) if memory_file else None
+        self.memory_backend = normalize_memory_backend(memory_backend)
+        self.memgpt_query_mode = (
+            normalize_memgpt_query_mode(os.environ.get("CEA_MI_MEMGPT_QUERY_MODE"))
+            if self.target == "memgpt" and self.memory_backend == "sdk"
+            else None
+        )
+        self.memory_store_path = Path(memory_store_path) if memory_store_path else None
         self.direct_probe_k = max(1, int(direct_probe_k))
         self.candidate_paraphrase = candidate_paraphrase
         self.paraphrase_runtime_seconds: Optional[float] = None
@@ -68,6 +86,8 @@ class NaturalAttack:
             cfg,
             db_path=cfg.nanobot_db_path,
             memory_file=self.memory_file,
+            memory_backend=self.memory_backend,
+            memory_store_path=self.memory_store_path,
         )
         self.multi_probe = MultiProbeDirectAttack(
             api_base=cfg.api_base,
@@ -75,6 +95,7 @@ class NaturalAttack:
             model=cfg.model,
             temperature=cfg.temperature,
             probe_concurrency=concurrency,
+            target_query_concurrency=target_query_concurrency,
             response_scorer=response_scorer,
             direct_probe_k=self.direct_probe_k,
             memory_statement_judge=True,
@@ -187,6 +208,10 @@ class NaturalAttack:
             report["runtime_scope"] = "attack execution through prediction generation; excludes metrics/report serialization"
         report["direct_probe_k"] = self.direct_probe_k
         report["probe_generation"] = "single LLM call generating k direct-recall probes per memory"
+        report["target_query_concurrency"] = self.target_query_concurrency
+        report["memory_backend"] = self.memory_backend
+        report["memory_query_mode"] = self.memgpt_query_mode
+        report["memory_store_path"] = str(self.memory_store_path) if self.memory_store_path else None
         report["candidate_paraphrase"] = self.candidate_paraphrase
         if self.candidate_paraphrase != "none":
             report["candidate_memory_source"] = "semantic paraphrase of sampled attack units"
@@ -256,13 +281,40 @@ async def amain():
         "--memory-file",
         default=None,
         help=(
-            "Working memory JSON path for mem0/memgpt natural attacks. "
+            "Working memory JSON path for mem0/memgpt light-backend natural attacks. "
             "It is rewritten as each user's member memories are prepared."
+        ),
+    )
+    parser.add_argument(
+        "--memory-backend",
+        choices=MEMORY_BACKEND_CHOICES,
+        default="light",
+        help=(
+            "Memory backend for mem0/memgpt targets: light uses the local JSON+embedding "
+            "adapter; sdk/full uses the full Mem0 or Letta SDK path"
+        ),
+    )
+    parser.add_argument(
+        "--memory-store-path",
+        default=None,
+        help=(
+            "Local SDK memory store path. For mem0 sdk this is the Qdrant path; "
+            "for memgpt sdk it is used as part of the temporary Letta agent name."
         ),
     )
     parser.add_argument("--max-users", type=int, default=None, help="Optionally limit to the first N users")
     parser.add_argument("--output-path", default=None, help="Manually set the result output directory")
     parser.add_argument("--concurrency", type=int, default=40, help="Max concurrent LLM calls")
+    parser.add_argument(
+        "--target-query-concurrency",
+        type=int,
+        default=None,
+        help=(
+            "Optional limit for concurrent target-agent queries. "
+            "Use this to serialize local memory backends such as Letta without "
+            "reducing probe generation or scoring concurrency."
+        ),
+    )
     parser.add_argument(
         "--direct-probe-k",
         type=int,
@@ -323,8 +375,18 @@ async def amain():
         cfg.nanobot_db_path = Path(args.db)
     if args.target == "nanobot" and args.memory_file:
         log.warning("--memory-file is ignored for nanobot target")
+    args.memory_backend = normalize_memory_backend(args.memory_backend)
+    if args.target == "nanobot" and args.memory_backend != "light":
+        log.warning("--memory-backend=%s is ignored for nanobot target", args.memory_backend)
     if args.target != "nanobot" and args.db:
         log.warning("--db is ignored for %s target", args.target)
+    memgpt_query_mode = (
+        normalize_memgpt_query_mode(os.environ.get("CEA_MI_MEMGPT_QUERY_MODE"))
+        if args.target == "memgpt" and args.memory_backend == "sdk"
+        else None
+    )
+    if memgpt_query_mode:
+        os.environ.setdefault("CEA_MI_MEMGPT_QUERY_MODE", memgpt_query_mode)
 
     dataset_name = args.dataset
     try:
@@ -337,6 +399,9 @@ async def amain():
 
     log.info("=" * 60)
     log.info("Target: %s", args.target)
+    log.info("Memory backend: %s", args.memory_backend if args.target != "nanobot" else "native")
+    if memgpt_query_mode:
+        log.info("MemGPT query mode: %s", memgpt_query_mode)
     log.info("Dataset: %s", dataset_name)
     log.info("Loaded MemoryDataset from %s", dataset_path)
     log.info("Dataset stats: %s", dataset.stats())
@@ -374,9 +439,18 @@ async def amain():
             if args.candidate_paraphrase == "none"
             else f"_candidate-{args.candidate_paraphrase}"
         )
+        backend_suffix = (
+            ""
+            if args.target == "nanobot" or args.memory_backend == "light"
+            else (
+                f"_{args.memory_backend}-{memgpt_query_mode}"
+                if memgpt_query_mode
+                else f"_{args.memory_backend}"
+            )
+        )
         output_name = (
             f"{dataset_name}_{args.target}_{args.response_scorer}"
-            f"_k{args.direct_probe_k}{paraphrase_suffix}_seed{seed}"
+            f"{backend_suffix}_k{args.direct_probe_k}{paraphrase_suffix}_seed{seed}"
         )
         if args.output_path:
             output_dir = Path(args.output_path) / output_name
@@ -385,6 +459,7 @@ async def amain():
 
         isolated_db: Optional[Path] = None
         target_memory_file: Optional[Path] = None
+        target_memory_store_path: Optional[Path] = None
 
         if args.target == "nanobot":
             isolated_db = create_empty_memory_db(
@@ -399,13 +474,23 @@ async def amain():
             cfg.nanobot_db_path = isolated_db
             log.info("Created isolated DB: %s", isolated_db)
         else:
-            target_memory_file = (
-                Path(args.memory_file).expanduser()
-                if args.memory_file
-                else output_dir / f"{args.target}_working_memories.json"
-            )
-            target_memory_file.parent.mkdir(parents=True, exist_ok=True)
-            log.info("Using %s working memory file: %s", args.target, target_memory_file)
+            if args.memory_backend == "light":
+                target_memory_file = (
+                    Path(args.memory_file).expanduser()
+                    if args.memory_file
+                    else output_dir / f"{args.target}_working_memories.json"
+                )
+                target_memory_file.parent.mkdir(parents=True, exist_ok=True)
+                log.info("Using %s light working memory file: %s", args.target, target_memory_file)
+            else:
+                default_store_name = f"{args.target}_sdk_store_pid{os.getpid()}"
+                target_memory_store_path = (
+                    Path(args.memory_store_path).expanduser()
+                    if args.memory_store_path
+                    else output_dir / default_store_name
+                )
+                target_memory_store_path.parent.mkdir(parents=True, exist_ok=True)
+                log.info("Using %s SDK memory store path: %s", args.target, target_memory_store_path)
 
         log.info("=" * 60)
         log.info("CEA-MI Natural Memory Attack (multi-probe direct)")
@@ -421,10 +506,14 @@ async def amain():
             args.direct_probe_k,
             args.candidate_paraphrase,
         )
+        log.info("Target query concurrency: %s", args.target_query_concurrency or "unlimited")
+        log.info("Memory backend: %s", args.memory_backend if args.target != "nanobot" else "native")
         if args.target == "nanobot":
             log.info("DB: %s", cfg.nanobot_db_path)
-        else:
+        elif args.memory_backend == "light":
             log.info("Memory file: %s", target_memory_file)
+        else:
+            log.info("Memory store path: %s", target_memory_store_path)
         log.info(
             "Attack set: %d users, %d members + %d nonmembers = %d total",
             len(user_attack_sets),
@@ -483,9 +572,12 @@ async def amain():
             cfg,
             rng,
             concurrency=args.concurrency,
+            target_query_concurrency=args.target_query_concurrency,
             response_scorer=args.response_scorer,
             target=args.target,
             memory_file=target_memory_file,
+            memory_backend=args.memory_backend,
+            memory_store_path=target_memory_store_path,
             direct_probe_k=args.direct_probe_k,
             candidate_paraphrase=args.candidate_paraphrase,
         )
@@ -502,6 +594,16 @@ async def amain():
 
             if not all_predictions:
                 raise RuntimeError("No predictions generated across all users")
+            successful_rounds = sum(pred.num_rounds_used for pred in all_predictions)
+            if successful_rounds == 0:
+                failed_stage_counts: dict[str, int] = {}
+                for pred in all_predictions:
+                    stage = pred.failed_stage or "unknown"
+                    failed_stage_counts[stage] = failed_stage_counts.get(stage, 0) + 1
+                raise RuntimeError(
+                    "No successful probe rounds were completed; refusing to write a "
+                    f"valid-looking empty result. Failed stages: {failed_stage_counts}"
+                )
 
             elapsed = time.time() - start
             log.info("=" * 60)
@@ -569,6 +671,11 @@ async def amain():
                     "dataset_stats": dataset.stats(),
                     "nanobot_db_path": str(cfg.nanobot_db_path) if args.target == "nanobot" else None,
                     "memory_file": str(target_memory_file) if target_memory_file else None,
+                    "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                    "memory_query_mode": memgpt_query_mode,
+                    "memory_store_path": (
+                        str(target_memory_store_path) if target_memory_store_path else None
+                    ),
                     "num_users": len(user_attack_sets),
                     "total_members": total_members,
                     "total_nonmembers": total_nonmembers,
@@ -624,6 +731,9 @@ async def amain():
                     "seed": seed,
                     "response_scorer": args.response_scorer,
                     "direct_probe_k": args.direct_probe_k,
+                    "target_query_concurrency": args.target_query_concurrency,
+                    "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                    "memory_query_mode": memgpt_query_mode,
                     "results": {
                         "mrmmia": {
                             "roc_auc": roc_value,
