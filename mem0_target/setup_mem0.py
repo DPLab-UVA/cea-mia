@@ -142,7 +142,8 @@ class Mem0Agent:
                  db_path="mem0_memories.json",
                  vllm_base: str | None = None,
                  vllm_model: str | None = None,
-                 vllm_api_key: str = DEFAULT_API_KEY):
+                 vllm_api_key: str = DEFAULT_API_KEY,
+                 defense_prompt: str = ""):
         from sentence_transformers import SentenceTransformer
         import numpy as np
 
@@ -152,6 +153,7 @@ class Mem0Agent:
         self.vllm_base = vllm_base or DEFAULT_API_BASE
         self.vllm_model = vllm_model or DEFAULT_MODEL
         self.vllm_api_key = vllm_api_key or DEFAULT_API_KEY
+        self.defense_prompt = defense_prompt.strip()
         self._np = np
 
         if self.db_path.exists():
@@ -213,6 +215,8 @@ class Mem0Agent:
             "If you don't have relevant memories, respond based on general knowledge."
             f"{memory_section}"
         )
+        if self.defense_prompt:
+            system_prompt = f"{system_prompt}\n\nPrivacy instruction: {self.defense_prompt}"
 
         payload = {
             "model": self.vllm_model,

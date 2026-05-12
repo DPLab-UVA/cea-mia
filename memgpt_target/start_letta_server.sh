@@ -75,11 +75,27 @@ mkdir -p "$LOG_DIR" "$LETTA_DIR" "$LETTA_LETTA_DIR" "$LETTA_HOME" "$COMPOSIO_CAC
 
 LOG_PATH="$LOG_DIR/letta_server_${SAFE_SERVER}_port${PORT}.log"
 PID_PATH="$LOG_DIR/letta_server_${SAFE_SERVER}_port${PORT}.pid"
+ENV_PATH="$LOG_DIR/letta_server_${SAFE_SERVER}_port${PORT}.env"
+
+write_env_file() {
+  cat > "$ENV_PATH" <<EOF
+export LETTA_BASE_URL=http://127.0.0.1:${PORT}
+export LETTA_PORT=${PORT}
+export LETTA_DIR=${LETTA_DIR}
+export LETTA_LETTA_DIR=${LETTA_LETTA_DIR}
+export LETTA_HOME=${LETTA_HOME}
+export HOME=${LETTA_HOME}
+export COMPOSIO_CACHE_DIR=${COMPOSIO_CACHE_DIR}
+export CEA_MI_LETTA_SERVER_NAME=${SAFE_SERVER}
+EOF
+}
 
 if [[ -f "$PID_PATH" ]] && kill -0 "$(cat "$PID_PATH")" 2>/dev/null; then
+  write_env_file
   echo "Letta server already appears to be running: pid=$(cat "$PID_PATH")"
   echo "PID file: $PID_PATH"
   echo "Log file: $LOG_PATH"
+  echo "Experiment env: source $ENV_PATH"
   exit 0
 fi
 
@@ -94,6 +110,8 @@ echo "  COMPOSIO_CACHE_DIR: $COMPOSIO_CACHE_DIR"
 echo "  OPENLLM_AUTH_TYPE:  $OPENLLM_AUTH_TYPE"
 echo "  python:      $PYTHON_BIN"
 echo "  log:         $LOG_PATH"
+
+write_env_file
 
 rm -f "$LOG_PATH"
 nohup env \
@@ -155,4 +173,5 @@ if [[ "$READY" != "1" ]]; then
 fi
 
 echo "Letta server is healthy: http://127.0.0.1:$LETTA_PORT/v1/health/"
+echo "Experiment env: source $ENV_PATH"
 echo "Tail logs with: tail -f $LOG_PATH"

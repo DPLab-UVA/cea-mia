@@ -33,10 +33,14 @@ from memory_paraphraser import MemoryParaphraser
 from memory_unit import MemoryDataset
 from models import AccessLevel, MembershipPrediction
 from multi_probe_attack import MultiProbeDirectAttack
+from round_io import save_round_json
 from target_adapters import (
+    DEFENSE_CHOICES,
     MEMORY_BACKEND_CHOICES,
     TARGET_CHOICES,
+    defense_prompt_for,
     load_target_agent,
+    normalize_defense,
     normalize_memgpt_query_mode,
     normalize_memory_backend,
 )
@@ -61,6 +65,7 @@ class NaturalAttack:
         memory_store_path: Optional[Path] = None,
         direct_probe_k: int = 5,
         candidate_paraphrase: str = "none",
+        defense: str = "none",
     ):
         self.cfg = cfg
         self.rng = rng
@@ -78,6 +83,7 @@ class NaturalAttack:
         self.memory_store_path = Path(memory_store_path) if memory_store_path else None
         self.direct_probe_k = max(1, int(direct_probe_k))
         self.candidate_paraphrase = candidate_paraphrase
+        self.defense = normalize_defense(defense)
         self.paraphrase_runtime_seconds: Optional[float] = None
         self.paraphrase_cache_path: Optional[Path] = None
         self.paraphrase_record_count: int = 0
@@ -88,6 +94,7 @@ class NaturalAttack:
             memory_file=self.memory_file,
             memory_backend=self.memory_backend,
             memory_store_path=self.memory_store_path,
+            defense=self.defense,
         )
         self.multi_probe = MultiProbeDirectAttack(
             api_base=cfg.api_base,
@@ -199,9 +206,15 @@ class NaturalAttack:
         output_dir: Path,
         runtime_seconds: Optional[float] = None,
         save_probe_responses: bool = False,
+        round_idx: int = 1,
+        rounds_requested: int = 1,
+        base_seed: Optional[int] = None,
     ) -> dict:
         al = AccessLevel(access_level)
         report = self.evaluator.full_report(predictions, al, seed)
+        report["round"] = round_idx
+        report["rounds_requested"] = rounds_requested
+        report["base_seed"] = seed if base_seed is None else base_seed
         report["attack_method"] = "multi_probe_direct_no_contrastive"
         if runtime_seconds is not None:
             report["runtime_seconds"] = float(runtime_seconds)
@@ -213,6 +226,8 @@ class NaturalAttack:
         report["memory_query_mode"] = self.memgpt_query_mode
         report["memory_store_path"] = str(self.memory_store_path) if self.memory_store_path else None
         report["candidate_paraphrase"] = self.candidate_paraphrase
+        report["defense"] = self.defense
+        report["defense_prompt"] = defense_prompt_for(self.defense) or None
         if self.candidate_paraphrase != "none":
             report["candidate_memory_source"] = "semantic paraphrase of sampled attack units"
             report["injected_memory_source"] = "original dataset member memory units"
@@ -236,11 +251,14 @@ class NaturalAttack:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         report["probe_responses_saved"] = bool(save_probe_responses)
-        self.evaluator.save_report(report, output_dir / "report.json")
-        self.evaluator.save_predictions(
-            predictions,
+        save_round_json(output_dir / "report.json", round_idx, report)
+        save_round_json(
             output_dir / "predictions.json",
-            include_probe_responses=save_probe_responses,
+            round_idx,
+            self.evaluator.prediction_rows(
+                predictions,
+                include_probe_responses=save_probe_responses,
+            ),
         )
         return report
 
@@ -271,6 +289,15 @@ async def amain():
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent dataset rounds to run. Round i uses seed+(i-1); "
+            "JSON outputs are keyed by the round number at the top level."
+        ),
+    )
     parser.add_argument(
         "--dataset",
         required=True,
@@ -331,6 +358,15 @@ async def amain():
         ),
     )
     parser.add_argument(
+        "--defense",
+        choices=DEFENSE_CHOICES,
+        default="none",
+        help=(
+            "Optional target-side defense. none preserves current behavior; "
+            "system_prompt appends a privacy instruction to the target agent's system prompt."
+        ),
+    )
+    parser.add_argument(
         "--paraphrase-temperature",
         type=float,
         default=0.3,
@@ -364,6 +400,8 @@ async def amain():
             "--access is deprecated and ignored. natural_attack now runs whitebox once "
             "and writes blackbox/graybox/whitebox derived outputs."
         )
+    if args.rounds < 1:
+        parser.error("--rounds must be >= 1")
 
     cfg = Config()
     try:
@@ -380,6 +418,7 @@ async def amain():
         log.warning("--memory-backend=%s is ignored for nanobot target", args.memory_backend)
     if args.target != "nanobot" and args.db:
         log.warning("--db is ignored for %s target", args.target)
+    args.defense = normalize_defense(args.defense)
     memgpt_query_mode = (
         normalize_memgpt_query_mode(os.environ.get("CEA_MI_MEMGPT_QUERY_MODE"))
         if args.target == "memgpt" and args.memory_backend == "sdk"
@@ -395,7 +434,8 @@ async def amain():
         parser.error(str(exc))
 
     dataset = load_memory_dataset(dataset_path)
-    seeds = [args.seed]
+    base_seed = args.seed
+    seeds = [base_seed + offset for offset in range(args.rounds)]
 
     log.info("=" * 60)
     log.info("Target: %s", args.target)
@@ -406,6 +446,8 @@ async def amain():
     log.info("Loaded MemoryDataset from %s", dataset_path)
     log.info("Dataset stats: %s", dataset.stats())
     log.info("Using up to %s users", args.max_users if args.max_users is not None else "all")
+    log.info("Rounds: %d (base seed=%d)", args.rounds, base_seed)
+    log.info("Defense: %s", args.defense)
     log.info(
         "Default algorithm: multi_probe_direct_no_contrastive (k=%d, candidate_paraphrase=%s)",
         args.direct_probe_k,
@@ -414,7 +456,7 @@ async def amain():
     log.info("=" * 60)
 
     all_reports = []
-    for seed in seeds:
+    for round_idx, seed in enumerate(seeds, start=1):
         cfg.seed = seed
         rng = random.Random(seed)
 
@@ -439,6 +481,8 @@ async def amain():
             if args.candidate_paraphrase == "none"
             else f"_candidate-{args.candidate_paraphrase}"
         )
+        defense_suffix = "" if args.defense == "none" else f"_def-{args.defense}"
+        round_suffix = f"_r{args.rounds}" if args.rounds > 1 else ""
         backend_suffix = (
             ""
             if args.target == "nanobot" or args.memory_backend == "light"
@@ -450,7 +494,8 @@ async def amain():
         )
         output_name = (
             f"{dataset_name}_{args.target}_{args.response_scorer}"
-            f"{backend_suffix}_k{args.direct_probe_k}{paraphrase_suffix}_seed{seed}"
+            f"{backend_suffix}_k{args.direct_probe_k}{paraphrase_suffix}"
+            f"_seed{base_seed}{defense_suffix}{round_suffix}"
         )
         if args.output_path:
             output_dir = Path(args.output_path) / output_name
@@ -480,23 +525,39 @@ async def amain():
                     if args.memory_file
                     else output_dir / f"{args.target}_working_memories.json"
                 )
+                if args.rounds > 1:
+                    target_memory_file = (
+                        target_memory_file.parent
+                        / f"{target_memory_file.stem}_round{round_idx}{target_memory_file.suffix}"
+                    )
                 target_memory_file.parent.mkdir(parents=True, exist_ok=True)
                 log.info("Using %s light working memory file: %s", args.target, target_memory_file)
             else:
-                default_store_name = f"{args.target}_sdk_store_pid{os.getpid()}"
+                default_store_name = (
+                    f"{args.target}_sdk_store_round{round_idx}_pid{os.getpid()}"
+                    if args.rounds > 1
+                    else f"{args.target}_sdk_store_pid{os.getpid()}"
+                )
                 target_memory_store_path = (
                     Path(args.memory_store_path).expanduser()
                     if args.memory_store_path
                     else output_dir / default_store_name
                 )
+                if args.rounds > 1 and args.memory_store_path:
+                    target_memory_store_path = (
+                        target_memory_store_path.parent
+                        / f"{target_memory_store_path.name}_round{round_idx}"
+                    )
                 target_memory_store_path.parent.mkdir(parents=True, exist_ok=True)
                 log.info("Using %s SDK memory store path: %s", args.target, target_memory_store_path)
 
         log.info("=" * 60)
         log.info("CEA-MI Natural Memory Attack (multi-probe direct)")
         log.info(
-            "Target: %s | Run access: %s | Derived access: %s | Units/class/user: %s | Seed: %d | Concurrency: %d | Scorer: %s | k: %d | Candidate paraphrase: %s",
+            "Target: %s | Round: %d/%d | Run access: %s | Derived access: %s | Units/class/user: %s | Seed: %d | Concurrency: %d | Scorer: %s | k: %d | Candidate paraphrase: %s",
             args.target,
+            round_idx,
+            args.rounds,
             run_access,
             ",".join(ACCESS_DERIVATION_ORDER),
             num_facts_label,
@@ -506,6 +567,7 @@ async def amain():
             args.direct_probe_k,
             args.candidate_paraphrase,
         )
+        log.info("Defense: %s", args.defense)
         log.info("Target query concurrency: %s", args.target_query_concurrency or "unlimited")
         log.info("Memory backend: %s", args.memory_backend if args.target != "nanobot" else "native")
         if args.target == "nanobot":
@@ -558,9 +620,11 @@ async def amain():
             paraphrase_runtime_seconds = time.time() - paraphrase_start
             paraphrase_record_count = len(paraphrase_records)
             paraphrase_audit_path = output_dir / "candidate_paraphrases.json"
-            paraphrase_audit_path.write_text(
-                json.dumps(paraphrase_records, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            save_round_json(
+                paraphrase_audit_path,
+                round_idx,
+                paraphrase_records,
+                ensure_ascii=False,
             )
             log.info(
                 "Candidate paraphrasing completed in %.1fs; audit written to %s",
@@ -580,6 +644,7 @@ async def amain():
             memory_store_path=target_memory_store_path,
             direct_probe_k=args.direct_probe_k,
             candidate_paraphrase=args.candidate_paraphrase,
+            defense=args.defense,
         )
         attacker.paraphrase_runtime_seconds = paraphrase_runtime_seconds
         attacker.paraphrase_cache_path = paraphrase_cache_path
@@ -607,7 +672,7 @@ async def amain():
 
             elapsed = time.time() - start
             log.info("=" * 60)
-            log.info("RESULTS (seed=%d)", seed)
+            log.info("RESULTS (round=%d/%d, seed=%d)", round_idx, args.rounds, seed)
             log.info("=" * 60)
 
             for access_level in ACCESS_DERIVATION_ORDER:
@@ -630,6 +695,9 @@ async def amain():
                     access_output_dir,
                     runtime_seconds=elapsed,
                     save_probe_responses=args.save_probe_responses,
+                    round_idx=round_idx,
+                    rounds_requested=args.rounds,
+                    base_seed=base_seed,
                 )
 
                 per_user_metrics = compute_per_user_metrics(
@@ -669,6 +737,10 @@ async def amain():
                     "dataset_name": dataset_name,
                     "dataset_path": str(dataset_path),
                     "dataset_stats": dataset.stats(),
+                    "round": round_idx,
+                    "rounds_requested": args.rounds,
+                    "base_seed": base_seed,
+                    "seed": seed,
                     "nanobot_db_path": str(cfg.nanobot_db_path) if args.target == "nanobot" else None,
                     "memory_file": str(target_memory_file) if target_memory_file else None,
                     "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
@@ -676,6 +748,8 @@ async def amain():
                     "memory_store_path": (
                         str(target_memory_store_path) if target_memory_store_path else None
                     ),
+                    "defense": args.defense,
+                    "defense_prompt": defense_prompt_for(args.defense) or None,
                     "num_users": len(user_attack_sets),
                     "total_members": total_members,
                     "total_nonmembers": total_nonmembers,
@@ -706,16 +780,26 @@ async def amain():
                     ],
                 }
                 access_output_dir.mkdir(parents=True, exist_ok=True)
-                with open(access_output_dir / "meta.json", "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2, ensure_ascii=False)
+                save_round_json(
+                    access_output_dir / "meta.json",
+                    round_idx,
+                    meta,
+                    ensure_ascii=False,
+                )
 
-                with open(access_output_dir / "per_user_metrics.json", "w", encoding="utf-8") as f:
-                    json.dump(per_user_metrics, f, indent=2, default=str)
+                save_round_json(
+                    access_output_dir / "per_user_metrics.json",
+                    round_idx,
+                    per_user_metrics,
+                )
 
                 global_report["seed"] = seed
+                global_report["round"] = round_idx
+                global_report["rounds_requested"] = args.rounds
+                global_report["base_seed"] = base_seed
                 global_report["per_user_metrics"] = per_user_metrics
                 global_report["derived_from_access"] = run_access
-                attacker.evaluator.save_report(global_report, access_output_dir / "report.json")
+                save_round_json(access_output_dir / "report.json", round_idx, global_report)
                 roc_summary = global_report.get("roc_auc", {})
                 roc_value = (
                     roc_summary.get("value", 0.0)
@@ -729,11 +813,16 @@ async def amain():
                     "dataset_name": dataset_name,
                     "dataset_path": str(dataset_path),
                     "seed": seed,
+                    "round": round_idx,
+                    "rounds_requested": args.rounds,
+                    "base_seed": base_seed,
                     "response_scorer": args.response_scorer,
                     "direct_probe_k": args.direct_probe_k,
                     "target_query_concurrency": args.target_query_concurrency,
                     "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
                     "memory_query_mode": memgpt_query_mode,
+                    "defense": args.defense,
+                    "defense_prompt": defense_prompt_for(args.defense) or None,
                     "results": {
                         "mrmmia": {
                             "roc_auc": roc_value,
@@ -745,8 +834,11 @@ async def amain():
                         }
                     },
                 }
-                with open(access_output_dir / "comparison.json", "w", encoding="utf-8") as f:
-                    json.dump(comparison_payload, f, indent=2)
+                save_round_json(
+                    access_output_dir / "comparison.json",
+                    round_idx,
+                    comparison_payload,
+                )
                 all_reports.append(global_report)
                 print(json.dumps(global_report, indent=2, default=str))
 
@@ -766,7 +858,7 @@ async def amain():
         import numpy as np
 
         log.info("=" * 60)
-        log.info("AGGREGATED RESULTS (%d seeds)", len(all_reports))
+        log.info("AGGREGATED RESULTS (%d round/access reports)", len(all_reports))
         for metric in ["accuracy", "brier_score", "avg_rounds_used"]:
             vals = [r.get(metric, 0.0) for r in all_reports]
             log.info("%s: mean=%.4f std=%.4f", metric, float(np.mean(vals)), float(np.std(vals)))

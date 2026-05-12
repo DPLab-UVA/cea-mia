@@ -288,7 +288,8 @@ class EmbeddingMemoryAgent:
     def __init__(self, model_name="BAAI/bge-small-en-v1.5", db_path="memgpt_memories.json",
                  vllm_base: str | None = None,
                  vllm_model: str | None = None,
-                 vllm_api_key: str = DEFAULT_API_KEY):
+                 vllm_api_key: str = DEFAULT_API_KEY,
+                 defense_prompt: str = ""):
         from sentence_transformers import SentenceTransformer
         import numpy as np
 
@@ -298,6 +299,7 @@ class EmbeddingMemoryAgent:
         self.vllm_base = vllm_base or DEFAULT_API_BASE
         self.vllm_model = vllm_model or DEFAULT_MODEL
         self.vllm_api_key = vllm_api_key or DEFAULT_API_KEY
+        self.defense_prompt = defense_prompt.strip()
         self._np = np
 
         if self.db_path.exists():
@@ -357,6 +359,8 @@ class EmbeddingMemoryAgent:
             f"{memory_section}\n"
             "Use recalled memories to answer questions about the user."
         )
+        if self.defense_prompt:
+            system_prompt = f"{system_prompt}\n\nPrivacy instruction: {self.defense_prompt}"
 
         payload = {
             "model": self.vllm_model,

@@ -6,7 +6,7 @@ This repository contains the current MRMMIA MemoryDataset attack pipeline, basel
 
 - `natural_attack.py`: main MRMMIA implementation. It injects each user's member memories, probes member and non-member units with multiple recall probes, runs whitebox once, and writes derived blackbox, graybox, and whitebox outputs.
 - `baselines/baseline_attacks.py`: comparison baselines such as naive single-query, loss, Min-K%, reference model, multi-contrastive, direct multi-probe, recall-no-reason, and multi-judge.
-- `run_all_natural_attacks.sh` and `run_baseline_attacks.sh`: convenience wrappers for common multi-dataset and multi-baseline runs. `baselines/run_baselines.sh` is the SDK-aware batch helper for baseline runs.
+- `run_all_natural_attacks.sh` and `run_baseline_attacks.sh`: convenience wrappers for common multi-dataset and multi-baseline runs, including light and SDK memory backends. `baselines/run_baselines.sh` is a compact SDK-aware batch helper for baseline runs.
 
 ## Setup
 
@@ -92,7 +92,7 @@ The Mem0 SDK path uses the Mem0 package for memory storage and retrieval:
 ```text
 prepare_user_memory()
   -> reset Mem0 Memory
-  -> add selected member units with metadata
+  -> add selected member units as raw statements with metadata
   -> store embeddings in local Qdrant path
 
 query()
@@ -101,17 +101,18 @@ query()
   -> call the configured vLLM/OpenAI-compatible chat endpoint
 ```
 
-During attack queries this adapter is read-only: it searches memory and calls vLLM, but it does not add probe text or model responses back into Mem0 memory. Useful controls:
+During attack queries this adapter is read-only: it searches memory and calls vLLM, but it does not add probe text or model responses back into Mem0 memory. By default insertion uses `infer=false`, so Mem0 stores the original sampled memory statement rather than an LLM-rewritten fact. Useful controls:
 
 - `CEA_MI_MEMORY_BACKEND=sdk`: select SDK mode from shell wrappers.
 - `CEA_MI_MEMORY_STORE_PATH`: optional explicit local SDK store path.
-- `CEA_MI_MEM0_INFER=false`: default; avoids LLM-based memory inference during insertion.
+- `CEA_MI_MEM0_INFER=false`: default in code and shell wrappers; avoids LLM-based memory inference during insertion.
+- `CEA_MI_MEM0_EMBEDDER_DEVICE=cpu`: default; keeps the Mem0 embedding model off the vLLM GPU.
 - `MEM0_TELEMETRY=false`: disables Mem0 telemetry.
 
 Example:
 
 ```bash
-nohup env MEM0_TELEMETRY=false CEA_MI_MEM0_INFER=false CEA_MI_MEMORY_BACKEND=sdk \
+nohup env MEM0_TELEMETRY=false CEA_MI_MEMORY_BACKEND=sdk \
   ./run_all_natural_attacks.sh dplab04 8001 locomo mem0 auto \
   > logs/run_mem0_sdk_locomo_dplab04_port8001.log 2>&1 &
 ```
@@ -132,7 +133,7 @@ The default query mode is `readonly`:
 ```text
 prepare_user_memory()
   -> create a temporary Letta agent for this user
-  -> insert selected member units into Letta archival memory
+  -> insert selected member units as raw passages into Letta archival memory
 
 query(), readonly mode
   -> search Letta archival memory
@@ -141,6 +142,24 @@ query(), readonly mode
 ```
 
 This treats Letta as the memory backend while keeping probe queries isolated from Letta's full agent runtime. The query stage does not call Letta `messages.create()` and does not let probe text write back into memory.
+
+By default, readonly mode uses `CEA_MI_MEMGPT_RECALL_BACKEND=letta_native`. This calls Letta's own embedding-based archival retrieval path, equivalent to the internal `archival_memory_search` workflow:
+
+```text
+agent_manager.list_passages(
+  query_text=probe,
+  embed_query=True,
+  embedding_config=agent_state.embedding_config,
+)
+```
+
+This is different from the public `passages.list(search=...)` API, which is only a substring text filter. Native recall requires the experiment process to see the same `LETTA_DIR` as the Letta server. The start script writes a sourceable env file:
+
+```bash
+source logs/letta_server_dplab05_port8283.env
+```
+
+Other recall backends are available for ablations: `CEA_MI_MEMGPT_RECALL_BACKEND=letta_text` uses the public text-filter API, and `CEA_MI_MEMGPT_RECALL_BACKEND=shadow` uses a local semantic shadow index for debugging only.
 
 Set `CEA_MI_MEMGPT_QUERY_MODE=agent` only when you want the full Letta agent runtime as an ablation:
 
@@ -156,6 +175,7 @@ Example:
 
 ```bash
 nohup env CEA_MI_MEMORY_BACKEND=sdk CEA_MI_MEMGPT_QUERY_MODE=readonly \
+  CEA_MI_MEMGPT_RECALL_BACKEND=letta_native \
   LETTA_BASE_URL=http://127.0.0.1:8283 \
   ./run_all_natural_attacks.sh dplab05 8001 locomo memgpt auto \
   > logs/run_memgpt_sdk_readonly_locomo_dplab05_port8001.log 2>&1 &
@@ -191,10 +211,26 @@ Pass an API host and port positionally if you do not want to export `CEA_MI_API_
 Outputs are written under:
 
 ```text
-results/<dataset>_<target>_<scorer>[_sdk|_sdk-readonly|_sdk-agent]_k<direct_probe_k>_seed<seed>/<access>/
+results/<dataset>_<target>_<scorer>[_sdk|_sdk-readonly|_sdk-agent]_k<direct_probe_k>_seed<seed>[_def-system_prompt][_rN]/<access>/
 ```
 
-Each access directory contains `report.json`, `predictions.json`, `comparison.json`, `meta.json`, and `per_user_metrics.json`.
+Both Python entry points and the shell wrappers support `--rounds` / trailing `rounds`. Round 1 uses `seed`, round 2 uses `seed+1`, and so on. When `rounds>1`, output directories include a suffix such as `_r3`. JSON outputs are round-wrapped at the top level:
+
+```json
+{
+  "1": {"seed": 42},
+  "2": {"seed": 43}
+}
+```
+
+Each access directory contains round-wrapped `report.json`, `predictions.json`, `comparison.json`, `meta.json`, and `per_user_metrics.json`.
+
+Both natural and baseline entry points also support `--defense none|system_prompt`. The default `none` preserves the original target prompt and output paths. `system_prompt` appends a privacy instruction to the target agent prompt and adds `_def-system_prompt` to output directories. In the shell wrappers, pass it after `rounds`, for example:
+
+```bash
+./run_all_natural_attacks.sh dplab04 8000 locomo mem0 auto sdk 1 system_prompt
+./run_baseline_attacks.sh dplab04 8001 locomo mem0 multi_judge auto sdk 1 system_prompt
+```
 
 ## Baselines
 
@@ -215,7 +251,7 @@ Run selected baselines through the wrapper:
 ./run_baseline_attacks.sh perltqa mem0 naive,mink,reference 20
 ```
 
-For SDK backends, pass `--memory-backend sdk` to the Python entry point, or use the SDK-aware batch helper:
+For SDK backends, pass `--memory-backend sdk` to the Python entry point, use the `memory_backend` positional argument in the root wrapper, or set `CEA_MI_MEMORY_BACKEND=sdk`:
 
 ```bash
 python3 baselines/baseline_attacks.py \
@@ -224,8 +260,12 @@ python3 baselines/baseline_attacks.py \
   --baseline naive \
   --memory-backend sdk
 
+nohup env MEM0_TELEMETRY=false \
+  ./run_baseline_attacks.sh dplab04 8001 locomo mem0 all auto sdk 3 \
+  > logs/run_baseline_mem0_sdk_locomo_dplab04_port8001.log 2>&1 &
+
 CEA_MI_MEMORY_BACKEND=sdk CEA_MI_DATASET=locomo CEA_MI_NUM_FACTS=none \
-  ./baselines/run_baselines.sh
+  ./baselines/run_baselines.sh 3 system_prompt
 ```
 
 Baseline access policy is handled internally: loss, Min-K%, and reference run with graybox information; the other baselines run whitebox once and write derived access-level outputs.

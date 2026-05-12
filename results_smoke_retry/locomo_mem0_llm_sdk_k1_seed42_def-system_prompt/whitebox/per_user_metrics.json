@@ -1,0 +1,65 @@
+{
+  "1": {
+    "accuracy_mean": 0.8045977011494253,
+    "accuracy_std": 0.0,
+    "brier_score_mean": 0.3985447068180051,
+    "brier_score_std": 0.0,
+    "ece_mean": 0.0,
+    "ece_std": 0.0,
+    "roc_auc_mean": 0.9741049015722025,
+    "roc_auc_std": 0.0,
+    "pr_auc_mean": 0.9773811455799541,
+    "pr_auc_std": 0.0,
+    "num_users": 1,
+    "per_user": {
+      "26": {
+        "seed": 0,
+        "access_level": "whitebox",
+        "n_samples": 174,
+        "n_members": 87,
+        "n_nonmembers": 87,
+        "roc_auc": {
+          "value": 0.9741049015722025,
+          "ci_lower": 0.9529906624383369,
+          "ci_upper": 0.989778985439045
+        },
+        "pr_auc": {
+          "value": 0.9773811455799541,
+          "ci_lower": 0.9579213658376738,
+          "ci_upper": 0.9905404960472906
+        },
+        "tpr_at_fpr_0.1": {
+          "value": 0.8850574712643678,
+          "ci_lower": 0.7978622407756532,
+          "ci_upper": 0.9787234042553191
+        },
+        "tpr_at_fpr_0.01": {
+          "value": 0.8045977011494253,
+          "ci_lower": 0.722204641350211,
+          "ci_upper": 0.8977560010214504
+        },
+        "tpr_at_fpr_0.005": {
+          "value": 0.8045977011494253,
+          "ci_lower": 0.7215042684721813,
+          "ci_upper": 0.8965811128526646
+        },
+        "tpr_at_fpr_0.001": {
+          "value": 0.8045977011494253,
+          "ci_lower": 0.7261391625615763,
+          "ci_upper": 0.8987341772151899
+        },
+        "tpr_at_fpr_0.0001": {
+          "value": 0.8045977011494253,
+          "ci_lower": 0.7191011235955056,
+          "ci_upper": 0.8947521419828641
+        },
+        "brier_score": 0.3985447068180051,
+        "ece": 0.0,
+        "avg_rounds_used": 1.0,
+        "total_queries": 174,
+        "accuracy": 0.8045977011494253,
+        "generated_at": "2026-05-11T22:27:48.062238+00:00"
+      }
+    }
+  }
+}

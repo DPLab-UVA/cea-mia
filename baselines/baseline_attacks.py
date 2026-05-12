@@ -18,9 +18,9 @@ Usage:
 from __future__ import annotations
 import argparse
 import asyncio
-import json
 import logging
 import math
+import os
 import random
 import sys
 import time
@@ -59,10 +59,14 @@ from multi_probe_attack import MultiProbeDirectAttack
 from evaluation import Evaluator
 from experiment_db import create_empty_memory_db, cleanup_isolated_db
 from probe_generator import ProbeGenerator
+from round_io import save_round_json
 from memory_unit import MemoryUnit, UserMemorySet
 from target_adapters import (
+    DEFENSE_CHOICES,
     MEMORY_BACKEND_CHOICES,
+    defense_prompt_for,
     load_target_agent as load_target_adapter,
+    normalize_defense,
     normalize_memgpt_query_mode,
     normalize_memory_backend,
 )
@@ -256,6 +260,7 @@ def load_target_agent(
     db_path: Optional[Path] = None,
     memory_backend: str = "light",
     memory_store_path: Optional[Path] = None,
+    defense: str = "none",
 ):
     """Load the appropriate agent based on target type.
 
@@ -274,6 +279,7 @@ def load_target_agent(
         memory_file=Path(memory_file) if memory_file else None,
         memory_backend=memory_backend,
         memory_store_path=memory_store_path,
+        defense=defense,
     )
 
 
@@ -1723,27 +1729,46 @@ async def run_baseline_per_user(
     )
 
     for idx, user_fact_set in enumerate(user_fact_sets, start=1):
-        prepare_agent_for_user(agent, target, user_fact_set)
+        attack_items = user_fact_set.sampled_units if baseline_name in UNIT_BASELINES else user_fact_set.facts
         log.info(
             "[User %d/%d] baseline=%s user_id=%d facts=%d",
             idx,
             len(user_fact_sets),
             baseline_name,
             user_fact_set.user_id,
-            len(user_fact_set.facts),
+            len(attack_items),
         )
-        attack_items = user_fact_set.sampled_units if baseline_name in UNIT_BASELINES else user_fact_set.facts
-        predictions, _ = await run_baseline(
-            baseline_name,
-            agent,
-            attack_items,
-            access_level,
-            target,
-            cfg,
-            response_scorer=response_scorer,
-            probe_concurrency=probe_concurrency,
-            direct_probe_k=direct_probe_k,
-        )
+        try:
+            prepare_agent_for_user(agent, target, user_fact_set)
+            predictions, _ = await run_baseline(
+                baseline_name,
+                agent,
+                attack_items,
+                access_level,
+                target,
+                cfg,
+                response_scorer=response_scorer,
+                probe_concurrency=probe_concurrency,
+                direct_probe_k=direct_probe_k,
+            )
+        except Exception as exc:
+            log.error(
+                "User-level baseline failed for baseline=%s user_id=%d: %s",
+                baseline_name,
+                user_fact_set.user_id,
+                exc,
+                exc_info=True,
+            )
+            if baseline_name in UNIT_BASELINES:
+                predictions = [
+                    failed_prediction_for_unit(unit, "user_baseline", exc)
+                    for unit in attack_items
+                ]
+            else:
+                predictions = [
+                    failed_prediction_for_fact(fact, "user_baseline", exc)
+                    for fact in attack_items
+                ]
         per_user_predictions[user_fact_set.user_id] = predictions
         all_predictions.extend(predictions)
 
@@ -1766,6 +1791,15 @@ async def amain():
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent dataset rounds to run. Round i uses seed+(i-1); "
+            "JSON outputs are keyed by the round number at the top level."
+        ),
+    )
     parser.add_argument("--dataset", default="perltqa")
     parser.add_argument("--memory-file", default=None, help="Light-backend JSON memory file for mem0/memgpt")
     parser.add_argument(
@@ -1778,6 +1812,15 @@ async def amain():
         "--memory-store-path",
         default=None,
         help="Local SDK memory store path. For mem0 sdk this is the Qdrant path; for memgpt sdk it labels temporary Letta agents.",
+    )
+    parser.add_argument(
+        "--defense",
+        choices=DEFENSE_CHOICES,
+        default="none",
+        help=(
+            "Optional target-side defense. none preserves current behavior; "
+            "system_prompt appends a privacy instruction to the target agent's system prompt."
+        ),
     )
     parser.add_argument("--db", default=None)
     parser.add_argument("--max-users", type=int, default=None)
@@ -1808,14 +1851,18 @@ async def amain():
             "--access is deprecated and ignored. Baselines now choose their own run access: "
             "loss/mink/reference=graybox; others=whitebox with derived outputs."
         )
+    if args.rounds < 1:
+        parser.error("--rounds must be >= 1")
 
     cfg = Config()
     try:
         cfg.require_llm_config()
     except ValueError as exc:
         parser.error(str(exc))
-    cfg.seed = args.seed
+    base_seed = args.seed
+    cfg.seed = base_seed
     args.memory_backend = normalize_memory_backend(args.memory_backend)
+    args.defense = normalize_defense(args.defense)
     memgpt_query_mode = (
         normalize_memgpt_query_mode(os.environ.get("CEA_MI_MEMGPT_QUERY_MODE"))
         if args.target == "memgpt" and args.memory_backend == "sdk"
@@ -1839,23 +1886,17 @@ async def amain():
         cfg.nanobot_db_path = Path(args.db)
 
     log.info(
-        "Target=%s memory_backend=%s memory_query_mode=%s",
+        "Target=%s memory_backend=%s memory_query_mode=%s defense=%s",
         args.target,
         args.memory_backend if args.target != "nanobot" else "native",
         memgpt_query_mode or "<none>",
+        args.defense,
     )
 
-    # Load per-user facts from MemoryDataset
+    # Resolve dataset and baseline plan once; each round resamples with its own seed.
     dataset_path = resolve_dataset_path(args.dataset, cfg)
     dataset_label = dataset_output_label(args.dataset)
-    user_fact_sets = load_user_fact_sets(
-        dataset_path,
-        args.num_facts,
-        args.seed,
-        max_users=args.max_users,
-    )
 
-    # Determine which baselines to run
     if args.baseline == "all":
         baseline_names = list(BASELINES.keys())
     else:
@@ -1865,268 +1906,360 @@ async def amain():
         raise ValueError(f"Unknown baseline(s): {', '.join(unknown_baselines)}")
     multiple_baselines = len(baseline_names) > 1
 
-    evaluator = Evaluator(bootstrap_n=1000, seed=args.seed)
-    all_results_by_access = {access: {} for access in ACCESS_DERIVATION_ORDER}
+    for round_idx in range(1, args.rounds + 1):
+        round_seed = base_seed + round_idx - 1
+        cfg.seed = round_seed
+        evaluator = Evaluator(bootstrap_n=1000, seed=round_seed)
+        all_results_by_access = {access: {} for access in ACCESS_DERIVATION_ORDER}
+        user_fact_sets = load_user_fact_sets(
+            dataset_path,
+            args.num_facts,
+            round_seed,
+            max_users=args.max_users,
+        )
+        log.info(
+            "Starting baseline round %d/%d (seed=%d, base_seed=%d)",
+            round_idx,
+            args.rounds,
+            round_seed,
+            base_seed,
+        )
 
-    for bname in baseline_names:
-        run_access = BASELINE_RUN_ACCESS[bname]
-        output_accesses = BASELINE_OUTPUT_ACCESSES[bname]
-        isolated_db = None
-        agent = None
-        memory_store_path = None
+        for bname in baseline_names:
+            run_access = BASELINE_RUN_ACCESS[bname]
+            output_accesses = BASELINE_OUTPUT_ACCESSES[bname]
+            isolated_db = None
+            agent = None
+            memory_store_path = None
 
-        try:
-            # Create isolated DB for this baseline (enables parallel execution)
-            if args.target == "nanobot":
-                isolated_db = create_empty_memory_db(
-                    output_dir=cfg.output_dir,
-                    seed=args.seed,
-                    access_level=run_access,
-                    algo_name=f"baseline_{bname}",
-                )
-                log.info("Created isolated DB for %s: %s", bname, isolated_db)
-                agent = load_target_agent(args.target, args.memory_file, cfg, db_path=isolated_db)
-            else:
-                if args.memory_backend == "sdk":
-                    memory_store_path = (
-                        Path(args.memory_store_path).expanduser()
-                        if args.memory_store_path
-                        else Path(cfg.output_dir)
-                        / f"{dataset_label}_{args.target}_baseline_{bname}_sdk_store_seed{args.seed}"
+            try:
+                # Create isolated DB for this baseline (enables parallel execution)
+                if args.target == "nanobot":
+                    isolated_db = create_empty_memory_db(
+                        output_dir=cfg.output_dir,
+                        seed=round_seed,
+                        access_level=run_access,
+                        algo_name=f"baseline_{bname}",
                     )
-                    memory_store_path.parent.mkdir(parents=True, exist_ok=True)
-                    log.info(
-                        "Using %s SDK memory store path for %s: %s",
+                    log.info("Created isolated DB for %s: %s", bname, isolated_db)
+                    agent = load_target_agent(
                         args.target,
-                        bname,
-                        memory_store_path,
+                        args.memory_file,
+                        cfg,
+                        db_path=isolated_db,
+                        defense=args.defense,
                     )
-                agent = load_target_agent(
-                    args.target,
-                    args.memory_file,
-                    cfg,
-                    memory_backend=args.memory_backend,
-                    memory_store_path=memory_store_path,
-                )
-
-            predictions, per_user_predictions, elapsed = await run_baseline_per_user(
-                bname,
-                agent,
-                user_fact_sets,
-                run_access,
-                args.target,
-                cfg,
-                response_scorer=args.response_scorer,
-                probe_concurrency=args.concurrency,
-                direct_probe_k=args.direct_probe_k,
-            )
-        finally:
-            if agent is not None and hasattr(agent, "close"):
-                try:
-                    await agent.close()
-                except Exception as exc:
-                    log.warning("Could not close target agent for %s: %s", bname, exc)
-            if args.target == "nanobot" and isolated_db and cleanup_isolated_db(isolated_db):
-                log.info("Cleaned up isolated DB: %s", isolated_db)
-            if args.target != "nanobot" and args.memory_backend == "light":
-                cleanup_generated_working_memory_file(args.memory_file)
-
-        # Save results
-        scorer_suffix = f"_{args.response_scorer}" if bname in SCORER_BASELINES else ""
-        probe_suffix = f"_k{args.direct_probe_k}" if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"} else ""
-        backend_suffix = (
-            ""
-            if args.target == "nanobot" or args.memory_backend == "light"
-            else (
-                f"_{args.memory_backend}-{memgpt_query_mode}"
-                if memgpt_query_mode
-                else f"_{args.memory_backend}"
-            )
-        )
-        default_dir_name = (
-            f"{dataset_label}_{args.target}{backend_suffix}"
-            f"_baseline_{bname}{scorer_suffix}{probe_suffix}_seed{args.seed}"
-        )
-        if args.output_path:
-            base_output_dir = Path(args.output_path)
-            output_base = base_output_dir / default_dir_name if multiple_baselines else base_output_dir
-        else:
-            output_base = Path(cfg.output_dir) / default_dir_name
-
-        for output_access in output_accesses:
-            al = AccessLevel(output_access)
-            threshold = baseline_score_threshold(bname)
-            if output_access == run_access and bname in GRAYBOX_ONLY_BASELINES:
-                output_predictions = predictions
-                output_per_user_predictions = per_user_predictions
-            else:
-                output_predictions = project_predictions_for_access(
-                    predictions,
-                    output_access,
-                    score_threshold=threshold,
-                )
-                output_per_user_predictions = project_per_user_predictions_for_access(
-                    per_user_predictions,
-                    output_access,
-                    score_threshold=threshold,
-                )
-
-            report = evaluator.full_report(output_predictions, al, args.seed)
-            report["dataset_name"] = args.dataset
-            report["dataset_path"] = str(dataset_path)
-            report["baseline_name"] = bname
-            report["run_access_level"] = run_access
-            report["output_access_level"] = output_access
-            report["derived_from_access"] = run_access
-            report["memory_backend"] = args.memory_backend if args.target != "nanobot" else "native"
-            report["memory_query_mode"] = memgpt_query_mode
-            report["memory_store_path"] = str(memory_store_path) if memory_store_path else None
-            report["probe_responses_saved"] = bool(args.save_probe_responses)
-            report["runtime_seconds"] = float(elapsed)
-            report["runtime_scope"] = "baseline execution through prediction generation; excludes metrics/report serialization"
-
-            per_user_metrics = compute_per_user_metrics(
-                output_per_user_predictions,
-                evaluator,
-                al,
-            )
-            report["per_user_metrics"] = per_user_metrics
-            if bname in UNIT_BASELINES:
-                report["probe_type_ablation"] = compute_probe_type_ablation(
-                    output_predictions,
-                    al,
-                    args.seed,
-                    score_threshold=threshold,
-                )
-            if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"}:
-                report["direct_probe_k"] = args.direct_probe_k
-                if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason"}:
-                    if bname == "multi_recall_no_reason":
-                        report["probe_generation"] = (
-                            "single LLM call generating k direct-recall probes per memory; "
-                            "old probe style without reason/source follow-up questions"
-                        )
-                    else:
-                        report["probe_generation"] = "single LLM call generating k direct-recall probes per memory"
-                    top_n_threshold = 0.5
                 else:
-                    report["judge_probe_k"] = args.direct_probe_k
-                    report["probe_generation"] = "single LLM call generating k yes/no judgment probes per memory"
-                    report["scoring"] = (
-                        "blackbox response score: correct yes/no=1, i_dont_know=-1, "
-                        "wrong_or_unparsed=0; graybox adds logprob; whitebox adds retrieved-memory "
-                        "statement score; feature weights match natural_attack (response=1, memory=1, logprob=1)"
+                    if args.memory_backend == "sdk":
+                        memory_store_path = (
+                            Path(args.memory_store_path).expanduser()
+                            if args.memory_store_path
+                            else Path(cfg.output_dir)
+                            / f"{dataset_label}_{args.target}_baseline_{bname}_sdk_store_seed{base_seed}"
+                        )
+                        if args.rounds > 1:
+                            memory_store_path = (
+                                memory_store_path.parent
+                                / f"{memory_store_path.name}_round{round_idx}"
+                            )
+                        memory_store_path.parent.mkdir(parents=True, exist_ok=True)
+                        log.info(
+                            "Using %s SDK memory store path for %s round %d: %s",
+                            args.target,
+                            bname,
+                            round_idx,
+                            memory_store_path,
+                        )
+                    agent = load_target_agent(
+                        args.target,
+                        args.memory_file,
+                        cfg,
+                        memory_backend=args.memory_backend,
+                        memory_store_path=memory_store_path,
+                        defense=args.defense,
                     )
-                    top_n_threshold = 0.0
-                report["top_n_response_ablation"] = compute_top_n_response_ablation(
-                    output_predictions,
+
+                predictions, per_user_predictions, elapsed = await run_baseline_per_user(
+                    bname,
+                    agent,
+                    user_fact_sets,
+                    run_access,
+                    args.target,
+                    cfg,
+                    response_scorer=args.response_scorer,
+                    probe_concurrency=args.concurrency,
+                    direct_probe_k=args.direct_probe_k,
+                )
+                if not predictions:
+                    raise RuntimeError(f"No predictions generated for baseline={bname}")
+                successful_rounds = sum(pred.num_rounds_used for pred in predictions)
+                if successful_rounds == 0:
+                    failed_stage_counts: dict[str, int] = {}
+                    for pred in predictions:
+                        stage = pred.failed_stage or "unknown"
+                        failed_stage_counts[stage] = failed_stage_counts.get(stage, 0) + 1
+                    raise RuntimeError(
+                        f"No successful probe rounds were completed for baseline={bname}; "
+                        "refusing to write a valid-looking empty result. "
+                        f"Failed stages: {failed_stage_counts}"
+                    )
+            finally:
+                if agent is not None and hasattr(agent, "close"):
+                    try:
+                        await agent.close()
+                    except Exception as exc:
+                        log.warning("Could not close target agent for %s: %s", bname, exc)
+                if args.target == "nanobot" and isolated_db and cleanup_isolated_db(isolated_db):
+                    log.info("Cleaned up isolated DB: %s", isolated_db)
+                if args.target != "nanobot" and args.memory_backend == "light":
+                    cleanup_generated_working_memory_file(args.memory_file)
+
+            # Save results
+            scorer_suffix = f"_{args.response_scorer}" if bname in SCORER_BASELINES else ""
+            probe_suffix = f"_k{args.direct_probe_k}" if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"} else ""
+            defense_suffix = "" if args.defense == "none" else f"_def-{args.defense}"
+            round_suffix = f"_r{args.rounds}" if args.rounds > 1 else ""
+            backend_suffix = (
+                ""
+                if args.target == "nanobot" or args.memory_backend == "light"
+                else (
+                    f"_{args.memory_backend}-{memgpt_query_mode}"
+                    if memgpt_query_mode
+                    else f"_{args.memory_backend}"
+                )
+            )
+            default_dir_name = (
+                f"{dataset_label}_{args.target}{backend_suffix}"
+                f"_baseline_{bname}{scorer_suffix}{probe_suffix}"
+                f"_seed{base_seed}{defense_suffix}{round_suffix}"
+            )
+            if args.output_path:
+                base_output_dir = Path(args.output_path)
+                output_base = base_output_dir / default_dir_name if multiple_baselines else base_output_dir
+            else:
+                output_base = Path(cfg.output_dir) / default_dir_name
+
+            for output_access in output_accesses:
+                al = AccessLevel(output_access)
+                threshold = baseline_score_threshold(bname)
+                if output_access == run_access and bname in GRAYBOX_ONLY_BASELINES:
+                    output_predictions = predictions
+                    output_per_user_predictions = per_user_predictions
+                else:
+                    output_predictions = project_predictions_for_access(
+                        predictions,
+                        output_access,
+                        score_threshold=threshold,
+                    )
+                    output_per_user_predictions = project_per_user_predictions_for_access(
+                        per_user_predictions,
+                        output_access,
+                        score_threshold=threshold,
+                    )
+
+                report = evaluator.full_report(output_predictions, al, round_seed)
+                report["dataset_name"] = args.dataset
+                report["dataset_path"] = str(dataset_path)
+                report["round"] = round_idx
+                report["rounds_requested"] = args.rounds
+                report["base_seed"] = base_seed
+                report["baseline_name"] = bname
+                report["run_access_level"] = run_access
+                report["output_access_level"] = output_access
+                report["derived_from_access"] = run_access
+                report["memory_backend"] = args.memory_backend if args.target != "nanobot" else "native"
+                report["memory_query_mode"] = memgpt_query_mode
+                report["memory_store_path"] = str(memory_store_path) if memory_store_path else None
+                report["defense"] = args.defense
+                report["defense_prompt"] = defense_prompt_for(args.defense) or None
+                report["probe_responses_saved"] = bool(args.save_probe_responses)
+                report["runtime_seconds"] = float(elapsed)
+                report["runtime_scope"] = "baseline execution through prediction generation; excludes metrics/report serialization"
+
+                per_user_metrics = compute_per_user_metrics(
+                    output_per_user_predictions,
+                    evaluator,
                     al,
-                    args.seed,
-                    score_threshold=top_n_threshold,
-                    max_n=args.direct_probe_k,
                 )
-            if bname == "reference":
-                report["scoring"] = (
-                    "target-with-memory vs raw-LLM reference; response feature is LLM-judge "
-                    "statement support delta, graybox adds logprob delta, whitebox adds target "
-                    "retrieved-memory statement score; feature weights match natural_attack "
-                    "(response=1, memory=1, logprob=1)"
+                report["per_user_metrics"] = per_user_metrics
+                if bname in UNIT_BASELINES:
+                    report["probe_type_ablation"] = compute_probe_type_ablation(
+                        output_predictions,
+                        al,
+                        round_seed,
+                        score_threshold=threshold,
+                    )
+                if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"}:
+                    report["direct_probe_k"] = args.direct_probe_k
+                    if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason"}:
+                        if bname == "multi_recall_no_reason":
+                            report["probe_generation"] = (
+                                "single LLM call generating k direct-recall probes per memory; "
+                                "old probe style without reason/source follow-up questions"
+                            )
+                        else:
+                            report["probe_generation"] = "single LLM call generating k direct-recall probes per memory"
+                        top_n_threshold = 0.5
+                    else:
+                        report["judge_probe_k"] = args.direct_probe_k
+                        report["probe_generation"] = "single LLM call generating k yes/no judgment probes per memory"
+                        report["scoring"] = (
+                            "blackbox response score: correct yes/no=1, i_dont_know=-1, "
+                            "wrong_or_unparsed=0; graybox adds logprob; whitebox adds retrieved-memory "
+                            "statement score; feature weights match natural_attack (response=1, memory=1, logprob=1)"
+                        )
+                        top_n_threshold = 0.0
+                    report["top_n_response_ablation"] = compute_top_n_response_ablation(
+                        output_predictions,
+                        al,
+                        round_seed,
+                        score_threshold=top_n_threshold,
+                        max_n=args.direct_probe_k,
+                    )
+                if bname == "reference":
+                    report["scoring"] = (
+                        "target-with-memory vs raw-LLM reference; response feature is LLM-judge "
+                        "statement support delta, graybox adds logprob delta, whitebox adds target "
+                        "retrieved-memory statement score; feature weights match natural_attack "
+                        "(response=1, memory=1, logprob=1)"
+                    )
+
+                output_dir = (
+                    output_base
+                    if bname in GRAYBOX_ONLY_BASELINES
+                    else output_base / output_access
+                )
+                output_dir.mkdir(parents=True, exist_ok=True)
+                save_round_json(output_dir / "report.json", round_idx, report)
+                save_round_json(
+                    output_dir / "predictions.json",
+                    round_idx,
+                    evaluator.prediction_rows(
+                        output_predictions,
+                        include_probe_responses=args.save_probe_responses,
+                    ),
+                )
+                save_round_json(
+                    output_dir / "per_user_metrics.json",
+                    round_idx,
+                    per_user_metrics,
                 )
 
-            output_dir = (
-                output_base
-                if bname in GRAYBOX_ONLY_BASELINES
-                else output_base / output_access
+                roc = report.get("roc_auc", {})
+                roc_val = roc.get("value", 0) if isinstance(roc, dict) else 0
+                acc = report.get("accuracy", 0)
+
+                result_summary = {
+                    "roc_auc": roc_val,
+                    "accuracy": acc,
+                    "runtime": elapsed,
+                    "queries": report.get("total_queries", 0),
+                    "run_access_level": run_access,
+                    "round": round_idx,
+                    "seed": round_seed,
+                    "base_seed": base_seed,
+                }
+                if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"}:
+                    result_summary["direct_probe_k"] = args.direct_probe_k
+
+                all_results_by_access[output_access][bname] = result_summary
+                comparison_payload = {
+                    "target": args.target,
+                    "access_level": output_access,
+                    "run_access_level": run_access,
+                    "dataset_name": args.dataset,
+                    "dataset_path": str(dataset_path),
+                    "seed": round_seed,
+                    "round": round_idx,
+                    "rounds_requested": args.rounds,
+                    "base_seed": base_seed,
+                    "response_scorer": args.response_scorer,
+                    "direct_probe_k": args.direct_probe_k,
+                    "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                    "memory_query_mode": memgpt_query_mode,
+                    "defense": args.defense,
+                    "defense_prompt": defense_prompt_for(args.defense) or None,
+                    "results": {bname: result_summary},
+                }
+                save_round_json(output_dir / "comparison.json", round_idx, comparison_payload)
+
+                log.info(
+                    "[round %d/%d %s/%s] ROC-AUC=%.4f  Accuracy=%.4f  Runtime=%.1fs",
+                    round_idx,
+                    args.rounds,
+                    bname,
+                    output_access,
+                    roc_val,
+                    acc,
+                    elapsed,
+                )
+
+        # Print comparison table for the current round.
+        for output_access, access_results in all_results_by_access.items():
+            if not access_results:
+                continue
+            log.info("=" * 60)
+            log.info(
+                "BASELINE COMPARISON (target=%s, access=%s, round=%d/%d)",
+                args.target,
+                output_access,
+                round_idx,
+                args.rounds,
             )
-            output_dir.mkdir(parents=True, exist_ok=True)
-            evaluator.save_report(report, output_dir / "report.json")
-            evaluator.save_predictions(
-                output_predictions,
-                output_dir / "predictions.json",
-                include_probe_responses=args.save_probe_responses,
+            log.info("=" * 60)
+            log.info("%-25s  ROC-AUC  Accuracy  Queries  Runtime", "Method")
+            log.info("-" * 60)
+            for bname, r in access_results.items():
+                log.info("%-25s  %.4f   %.4f    %d      %.1fs",
+                         bname, r["roc_auc"], r["accuracy"], r["queries"], r["runtime"])
+            log.info("-" * 60)
+
+        # Save combined results for the current round.
+        for output_access, access_results in all_results_by_access.items():
+            if not access_results:
+                continue
+            combined_backend_suffix = (
+                ""
+                if args.target == "nanobot" or args.memory_backend == "light"
+                else (
+                    f"_{args.memory_backend}-{memgpt_query_mode}"
+                    if memgpt_query_mode
+                    else f"_{args.memory_backend}"
+                )
             )
-            with open(output_dir / "per_user_metrics.json", "w", encoding="utf-8") as f:
-                json.dump(per_user_metrics, f, indent=2, default=str)
-
-            roc = report.get("roc_auc", {})
-            roc_val = roc.get("value", 0) if isinstance(roc, dict) else 0
-            acc = report.get("accuracy", 0)
-
-            result_summary = {
-                "roc_auc": roc_val,
-                "accuracy": acc,
-                "runtime": elapsed,
-                "queries": report.get("total_queries", 0),
-                "run_access_level": run_access,
-            }
-            if bname in {"multi_direct_no_contrastive", "multi_recall_no_reason", "multi_judge"}:
-                result_summary["direct_probe_k"] = args.direct_probe_k
-
-            all_results_by_access[output_access][bname] = result_summary
-            comparison_payload = {
-                "target": args.target,
-                "access_level": output_access,
-                "run_access_level": run_access,
-                "dataset_name": args.dataset,
-                "dataset_path": str(dataset_path),
-                "seed": args.seed,
-                "response_scorer": args.response_scorer,
-                "direct_probe_k": args.direct_probe_k,
-                "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
-                "memory_query_mode": memgpt_query_mode,
-                "results": {bname: result_summary},
-            }
-            with open(output_dir / "comparison.json", "w", encoding="utf-8") as f:
-                json.dump(comparison_payload, f, indent=2)
-
-            log.info("[%s/%s] ROC-AUC=%.4f  Accuracy=%.4f  Runtime=%.1fs",
-                     bname, output_access, roc_val, acc, elapsed)
-
-    # Print comparison table
-    for output_access, access_results in all_results_by_access.items():
-        if not access_results:
-            continue
-        log.info("=" * 60)
-        log.info("BASELINE COMPARISON (target=%s, access=%s)", args.target, output_access)
-        log.info("=" * 60)
-        log.info("%-25s  ROC-AUC  Accuracy  Queries  Runtime", "Method")
-        log.info("-" * 60)
-        for bname, r in access_results.items():
-            log.info("%-25s  %.4f   %.4f    %d      %.1fs",
-                     bname, r["roc_auc"], r["accuracy"], r["queries"], r["runtime"])
-        log.info("-" * 60)
-
-    # Save combined results
-    for output_access, access_results in all_results_by_access.items():
-        if not access_results:
-            continue
-        combined_backend_suffix = (
-            ""
-            if args.target == "nanobot" or args.memory_backend == "light"
-            else (
-                f"_{args.memory_backend}-{memgpt_query_mode}"
-                if memgpt_query_mode
-                else f"_{args.memory_backend}"
+            combined_defense_suffix = "" if args.defense == "none" else f"_def-{args.defense}"
+            combined_dir = (
+                Path(args.output_path) / "comparison" / output_access
+                if args.output_path and multiple_baselines
+                else Path(cfg.output_dir) / (
+                    f"{dataset_label}_{args.target}{combined_backend_suffix}"
+                    f"_{output_access}_baselines_seed{base_seed}{combined_defense_suffix}{round_suffix}"
+                )
             )
-        )
-        combined_dir = (
-            Path(args.output_path) / "comparison" / output_access
-            if args.output_path and multiple_baselines
-            else Path(cfg.output_dir) / f"{dataset_label}_{args.target}{combined_backend_suffix}_{output_access}_baselines_seed{args.seed}"
-        )
-        if args.output_path and not multiple_baselines:
-            continue
-        combined_dir.mkdir(parents=True, exist_ok=True)
-        with open(combined_dir / "comparison.json", "w", encoding="utf-8") as f:
-            json.dump({"target": args.target, "access_level": output_access,
-                        "dataset_name": args.dataset,
-                        "dataset_path": str(dataset_path),
-                        "seed": args.seed,
-                        "response_scorer": args.response_scorer,
-                        "direct_probe_k": args.direct_probe_k,
-                        "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
-                        "memory_query_mode": memgpt_query_mode,
-                        "results": access_results}, f, indent=2)
+            if args.output_path and not multiple_baselines:
+                continue
+            combined_dir.mkdir(parents=True, exist_ok=True)
+            save_round_json(
+                combined_dir / "comparison.json",
+                round_idx,
+                {
+                    "target": args.target,
+                    "access_level": output_access,
+                    "dataset_name": args.dataset,
+                    "dataset_path": str(dataset_path),
+                    "seed": round_seed,
+                    "round": round_idx,
+                    "rounds_requested": args.rounds,
+                    "base_seed": base_seed,
+                    "response_scorer": args.response_scorer,
+                    "direct_probe_k": args.direct_probe_k,
+                    "memory_backend": args.memory_backend if args.target != "nanobot" else "native",
+                    "memory_query_mode": memgpt_query_mode,
+                    "defense": args.defense,
+                    "defense_prompt": defense_prompt_for(args.defense) or None,
+                    "results": access_results,
+                },
+            )
 
 
 if __name__ == "__main__":

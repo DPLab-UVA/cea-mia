@@ -175,7 +175,7 @@ class Evaluator:
         ]
         return {key: features[key] for key in keys if key in features}
 
-    def save_predictions(self, predictions, output_path: Path, include_probe_responses: bool = False):
+    def prediction_rows(self, predictions, include_probe_responses: bool = False):
         rows = []
         for p in predictions:
             row = {
@@ -245,5 +245,12 @@ class Evaluator:
                     for evidence in p.evidence_trail
                 ]
             rows.append(row)
+        return rows
+
+    def save_predictions(self, predictions, output_path: Path, include_probe_responses: bool = False):
+        rows = self.prediction_rows(
+            predictions,
+            include_probe_responses=include_probe_responses,
+        )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(rows, indent=2))

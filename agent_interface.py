@@ -58,6 +58,7 @@ class AgentInterface:
         db_path: Optional[Path] = None,
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        defense_prompt: str = "",
     ):
         if not api_base or not model:
             raise ValueError(
@@ -70,6 +71,7 @@ class AgentInterface:
         self.db_path = db_path or DEFAULT_NANOBOT_DB_PATH
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.defense_prompt = defense_prompt.strip()
         self.client = httpx.AsyncClient(timeout=120)
         self.query_count = 0
         self._store: Optional[MemoryStore] = None
@@ -205,6 +207,10 @@ class AgentInterface:
                 "Episodic memories are raw recent experiences."
             )
 
+        defense_section = ""
+        if self.defense_prompt:
+            defense_section = f"\n\n## Privacy Instruction\n{self.defense_prompt}"
+
         return f"""# nanobot
 
 You are nanobot, a helpful AI assistant running locally.
@@ -218,7 +224,7 @@ You are nanobot, a helpful AI assistant running locally.
 ## Guidelines
 - Be helpful, accurate, and concise
 - Pay attention to recalled memories \u2014 they contain lessons from past interactions
-{pmc_section}"""
+{pmc_section}{defense_section}"""
 
     # \u2500\u2500 Query the agent \u2500\u2500
 

@@ -26,7 +26,10 @@ RETRYABLE_STATUS_CODES = {
 RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
+    httpx.ReadError,
     httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
     httpx.WriteTimeout,
     httpx.PoolTimeout,
     ConnectionError,
