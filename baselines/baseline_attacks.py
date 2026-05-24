@@ -1740,6 +1740,21 @@ async def run_baseline_per_user(
         )
         try:
             prepare_agent_for_user(agent, target, user_fact_set)
+        except Exception as exc:
+            log.error(
+                "Memory injection failed for baseline=%s user_id=%d: %s",
+                baseline_name,
+                user_fact_set.user_id,
+                exc,
+                exc_info=True,
+            )
+            raise RuntimeError(
+                f"Memory injection failed for baseline={baseline_name} "
+                f"user_id={user_fact_set.user_id}; aborting experiment instead "
+                "of writing partial memory-injection failures."
+            ) from exc
+
+        try:
             predictions, _ = await run_baseline(
                 baseline_name,
                 agent,
@@ -1819,7 +1834,9 @@ async def amain():
         default="none",
         help=(
             "Optional target-side defense. none preserves current behavior; "
-            "system_prompt appends a privacy instruction to the target agent's system prompt."
+            "system_prompt appends a privacy instruction; strict_system_prompt "
+            "uses a stronger instruction that forbids memory disclosure even "
+            "when it may reduce answer accuracy."
         ),
     )
     parser.add_argument("--db", default=None)

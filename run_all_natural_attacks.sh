@@ -20,7 +20,7 @@ Positional arguments:
   num_facts      N, none, or auto. Default: auto.
   memory_backend light, sdk, or full. Default: light. sdk/full is Mem0/Letta SDK.
   rounds         Number of independent dataset rounds. Default: 1.
-  defense        none or system_prompt. Default: none.
+  defense        none, system_prompt, or strict_system_prompt. Default: none.
 
 Dataset-dependent num_facts when num_facts=auto:
   perltqa/test -> 20
@@ -87,7 +87,7 @@ is_memory_backend_arg() {
 
 is_defense_arg() {
   case "${1,,}" in
-    none|off|false|0|system_prompt|system-prompt|prompt|privacy_prompt) return 0 ;;
+    none|off|false|0|system_prompt|system-prompt|prompt|privacy_prompt|strict_system_prompt|strict-system-prompt|strict_prompt|strict-prompt|strong_system_prompt|strong-system-prompt) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -102,7 +102,8 @@ normalize_defense() {
   case "$value" in
     ""|none|off|false|0) echo "none" ;;
     system_prompt|prompt|privacy_prompt) echo "system_prompt" ;;
-    *) die "defense must be none or system_prompt" ;;
+    strict_system_prompt|strict_prompt|strong_system_prompt|strong_prompt) echo "strict_system_prompt" ;;
+    *) die "defense must be none, system_prompt, or strict_system_prompt" ;;
   esac
 }
 

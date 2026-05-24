@@ -180,7 +180,7 @@ Return ONLY valid JSON in this exact shape:
 # paths when recalled memory snippets are available. Scores recalled memory
 # text similarity against the full statement.
 MEMORY_STATEMENT_JUDGE_PROMPT = """\
-You are a strict evaluator for a white-box memory membership experiment.
+You are a strict evaluator for a white-box memory membership experiment. 
 
 Judge the text and information similarity between the RECALLED MEMORY and CANDIDATE STATEMENT.
 The QUESTION is context only, not evidence.

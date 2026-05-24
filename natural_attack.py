@@ -151,10 +151,10 @@ class NaturalAttack:
             self._prepare_user_memory(dataset, user_id)
         except Exception as exc:
             log.error("Memory injection failed for user %d: %s", user_id, exc, exc_info=True)
-            return [
-                failed_prediction_for_unit(unit, "memory_injection", exc)
-                for unit in user_attack_set.all_units
-            ]
+            raise RuntimeError(
+                f"Memory injection failed for user {user_id}; aborting experiment "
+                "instead of writing partial memory-injection failures."
+            ) from exc
 
         return await self.multi_probe.attack(
             self.agent,
@@ -363,7 +363,9 @@ async def amain():
         default="none",
         help=(
             "Optional target-side defense. none preserves current behavior; "
-            "system_prompt appends a privacy instruction to the target agent's system prompt."
+            "system_prompt appends a privacy instruction; strict_system_prompt "
+            "uses a stronger instruction that forbids memory disclosure even "
+            "when it may reduce answer accuracy."
         ),
     )
     parser.add_argument(

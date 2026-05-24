@@ -12,7 +12,7 @@ from typing import Optional
 
 import httpx
 
-from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_MODEL
+from config import DEFAULT_API_BASE, DEFAULT_API_KEY, DEFAULT_LLM_TIMEOUT, DEFAULT_MODEL
 from http_utils import post_with_retry
 from json_utils import JsonObjectError, loads_json_object
 from models import Fact, Probe, ProbeType, DecoyPair
@@ -239,7 +239,7 @@ class ProbeGenerator:
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=60.0)
+            self._client = httpx.AsyncClient(timeout=DEFAULT_LLM_TIMEOUT)
         return self._client
 
     async def close(self):

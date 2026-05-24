@@ -37,8 +37,9 @@ normalize_defense() {
     case "$value" in
         ""|none|off|false|0) echo "none" ;;
         system_prompt|prompt|privacy_prompt) echo "system_prompt" ;;
+        strict_system_prompt|strict_prompt|strong_system_prompt|strong_prompt) echo "strict_system_prompt" ;;
         *)
-            echo "Error: defense must be none or system_prompt" >&2
+            echo "Error: defense must be none, system_prompt, or strict_system_prompt" >&2
             exit 1
             ;;
     esac
