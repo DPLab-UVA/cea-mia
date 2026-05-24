@@ -13,9 +13,20 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 DEFAULT_API_BASE = os.environ.get("CEA_MI_API_BASE")
 DEFAULT_API_KEY = os.environ.get("CEA_MI_API_KEY", "token-vllm")
 DEFAULT_MODEL = os.environ.get("CEA_MI_MODEL")
+DEFAULT_LLM_TIMEOUT = _env_float("CEA_MI_LLM_TIMEOUT", 180.0)
 DEFAULT_NANOBOT_DB_PATH = _env_path(
     "CEA_MI_NANOBOT_DB_PATH",
     Path.home() / ".nanobot" / "memory" / "pmc.db",

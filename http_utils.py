@@ -26,7 +26,10 @@ RETRYABLE_STATUS_CODES = {
 RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
+    httpx.ReadError,
     httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
     httpx.WriteTimeout,
     httpx.PoolTimeout,
     ConnectionError,
@@ -70,15 +73,21 @@ async def retry_async(
             if attempt < max_retries:
                 delay = min(base_delay * (exponential_base ** attempt), max_delay)
                 log.warning(
-                    "Request failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                    "Request failed (attempt %d/%d, %s): %s. Retrying in %.1fs...",
                     attempt + 1,
                     max_retries + 1,
+                    type(e).__name__,
                     str(e),
                     delay,
                 )
                 await asyncio.sleep(delay)
             else:
-                log.error("Request failed after %d attempts: %s", max_retries + 1, str(e))
+                log.error(
+                    "Request failed after %d attempts (%s): %s",
+                    max_retries + 1,
+                    type(e).__name__,
+                    str(e),
+                )
         except httpx.HTTPStatusError as e:
             last_exception = e
             if e.response.status_code in RETRYABLE_STATUS_CODES and attempt < max_retries:
