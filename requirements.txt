@@ -8,7 +8,7 @@ httpx>=0.27,<1
 numpy>=1.24,<2
 scikit-learn>=1.3,<2
 pydantic>=2,<3
-vllm==0.20.0
+vllm==0.26.0
 
 # Lightweight Mem0/MemGPT-style targets use sentence-transformers for local
 # embedding retrieval. Keep this on the 2.x line to avoid pulling newer training
